@@ -70,13 +70,24 @@ def set_guild_setting(guild_id: int, key: str, value):
 
 
 def fill_placeholders(text: str, member: discord.Member) -> str:
-    """Replace {user}, {username}, {server}, {membercount} with real values."""
+    """Replace {user}, {username}, {server}, {membercount}, {joindate} with real values."""
     return (
         text.replace("{user}", member.mention)
         .replace("{username}", member.name)
         .replace("{server}", member.guild.name)
         .replace("{membercount}", str(member.guild.member_count))
+        .replace("{ordinal}", ordinal(member.guild.member_count))
+        .replace("{joindate}", member.created_at.strftime("%d/%b/%Y"))
     )
+
+
+def ordinal(n: int) -> str:
+    """Turn 222 into '222th', 1 into '1st', 2 into '2nd', 3 into '3rd', etc."""
+    if 11 <= (n % 100) <= 13:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
 
 
 @bot.event
@@ -143,22 +154,47 @@ async def notify(interaction: discord.Interaction, message: str):
 # WELCOMER
 # ---------------------------------------------------------------------------
 
-@bot.tree.command(name="setwelcome", description="Set the channel and message for welcoming new members")
+@bot.tree.command(name="setwelcome", description="Set up a fancy welcome embed for new members")
 @app_commands.describe(
     channel="Which channel should welcome messages go in?",
-    message="Use {user}, {username}, {server}, {membercount} as placeholders (optional)",
+    title="Big bold title at the top of the embed (optional)",
+    description="Main text. Use {user} {username} {server} {ordinal} {membercount} {joindate} (optional)",
+    banner_url="Link to an image to show big at the bottom of the embed (optional)",
+    ping_text="Plain text shown above the embed, e.g. 'Hey {username} Welcome' (optional)",
 )
-async def setwelcome(interaction: discord.Interaction, channel: discord.TextChannel, message: str = None):
+async def setwelcome(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel,
+    title: str = None,
+    description: str = None,
+    banner_url: str = None,
+    ping_text: str = None,
+):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("Only a server admin can set this up.", ephemeral=True)
         return
 
-    default_message = "🎉 Welcome {user} to **{server}**! We're now {membercount} members strong."
+    default_title = "WELCOME TO {server}"
+    default_description = (
+        "• Welcome To **{server}**\n"
+        "⚠️ Enjoy Ur Stay Here\n"
+        "➤ {user}\n"
+        "➤ {username}\n"
+        "➤ Acc Created : {joindate}"
+    )
+    default_ping = "{user} Welcome"
+
     set_guild_setting(interaction.guild.id, "welcome_channel", channel.id)
-    set_guild_setting(interaction.guild.id, "welcome_message", message or default_message)
+    set_guild_setting(interaction.guild.id, "welcome_title", title or default_title)
+    set_guild_setting(interaction.guild.id, "welcome_message", description or default_description)
+    set_guild_setting(interaction.guild.id, "welcome_ping", ping_text or default_ping)
+    if banner_url:
+        set_guild_setting(interaction.guild.id, "welcome_banner", banner_url)
 
     await interaction.response.send_message(
-        f"✅ Welcome messages will now be sent in {channel.mention}.", ephemeral=True
+        f"✅ Fancy welcome messages will now be sent in {channel.mention}. "
+        f"Try having someone join (or use a test account) to see it!",
+        ephemeral=True,
     )
 
 
@@ -192,12 +228,27 @@ async def on_member_join(member: discord.Member):
     if channel is None:
         return
 
-    message_template = settings.get("welcome_message", "🎉 Welcome {user} to **{server}**!")
-    text = fill_placeholders(message_template, member)
+    title_template = settings.get("welcome_title", "WELCOME TO {server}")
+    desc_template = settings.get(
+        "welcome_message",
+        "• Welcome To **{server}**\n⚠️ Enjoy Ur Stay Here\n➤ {user}\n➤ {username}\n➤ Acc Created : {joindate}",
+    )
+    ping_template = settings.get("welcome_ping", "{user} Welcome")
+    banner_url = settings.get("welcome_banner")
 
-    embed = discord.Embed(description=text, color=discord.Color.green())
+    embed = discord.Embed(
+        title=fill_placeholders(title_template, member),
+        description=fill_placeholders(desc_template, member),
+        color=discord.Color.purple(),
+    )
     embed.set_thumbnail(url=member.display_avatar.url)
-    await channel.send(embed=embed)
+    if banner_url:
+        embed.set_image(url=banner_url)
+    embed.set_footer(text=f"{ordinal(member.guild.member_count)} member!")
+    embed.timestamp = discord.utils.utcnow()
+
+    content = fill_placeholders(ping_template, member)
+    await channel.send(content=content, embed=embed)
 
 
 @bot.event

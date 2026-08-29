@@ -154,67 +154,95 @@ async def notify(interaction: discord.Interaction, message: str):
 # WELCOMER
 # ---------------------------------------------------------------------------
 
+class WelcomeModal(discord.ui.Modal, title="Welcome Message Setup"):
+    """A popup form with real multi-line boxes (Enter key works here!)."""
+
+    embed_title = discord.ui.TextInput(
+        label="Title",
+        placeholder="WELCOME TO {server}",
+        required=False,
+        max_length=100,
+    )
+    description = discord.ui.TextInput(
+        label="Description (press Enter for new lines)",
+        style=discord.TextStyle.paragraph,
+        placeholder="〻 WELCOME {username}\n» You joined {server}\n» {membercount} members now",
+        required=False,
+        max_length=1000,
+    )
+    ping_text = discord.ui.TextInput(
+        label="Text shown above the box (optional)",
+        placeholder="{user} Welcome",
+        required=False,
+        max_length=200,
+    )
+    banner_url = discord.ui.TextInput(
+        label="Banner image link (optional)",
+        required=False,
+        max_length=300,
+    )
+
+    def __init__(self, channel: discord.TextChannel):
+        super().__init__()
+        self.channel = channel
+
+    async def on_submit(self, interaction: discord.Interaction):
+        set_guild_setting(interaction.guild.id, "welcome_channel", self.channel.id)
+        if self.embed_title.value:
+            set_guild_setting(interaction.guild.id, "welcome_title", self.embed_title.value)
+        if self.description.value:
+            set_guild_setting(interaction.guild.id, "welcome_message", self.description.value)
+        if self.ping_text.value:
+            set_guild_setting(interaction.guild.id, "welcome_ping", self.ping_text.value)
+        if self.banner_url.value:
+            set_guild_setting(interaction.guild.id, "welcome_banner", self.banner_url.value)
+
+        await interaction.response.send_message(
+            f"✅ Welcome messages are set up in {self.channel.mention}!", ephemeral=True
+        )
+
+
+class GoodbyeModal(discord.ui.Modal, title="Goodbye Message Setup"):
+    """A popup form with real multi-line boxes (Enter key works here!)."""
+
+    description = discord.ui.TextInput(
+        label="Message (press Enter for new lines)",
+        style=discord.TextStyle.paragraph,
+        placeholder="〻 GOODBYE {username}\n» You have left {server}\n» {membercount} members remain",
+        required=False,
+        max_length=1000,
+    )
+
+    def __init__(self, channel: discord.TextChannel):
+        super().__init__()
+        self.channel = channel
+
+    async def on_submit(self, interaction: discord.Interaction):
+        set_guild_setting(interaction.guild.id, "goodbye_channel", self.channel.id)
+        if self.description.value:
+            set_guild_setting(interaction.guild.id, "goodbye_message", self.description.value)
+
+        await interaction.response.send_message(
+            f"✅ Goodbye messages are set up in {self.channel.mention}!", ephemeral=True
+        )
+
+
 @bot.tree.command(name="setwelcome", description="Set up a fancy welcome embed for new members")
-@app_commands.describe(
-    channel="Which channel should welcome messages go in?",
-    title="Big bold title at the top of the embed (optional)",
-    description="Main text. Use {user} {username} {server} {ordinal} {membercount} {joindate} (optional)",
-    banner_url="Link to an image to show big at the bottom of the embed (optional)",
-    ping_text="Plain text shown above the embed, e.g. 'Hey {username} Welcome' (optional)",
-)
-async def setwelcome(
-    interaction: discord.Interaction,
-    channel: discord.TextChannel,
-    title: str = None,
-    description: str = None,
-    banner_url: str = None,
-    ping_text: str = None,
-):
+@app_commands.describe(channel="Which channel should welcome messages go in?")
+async def setwelcome(interaction: discord.Interaction, channel: discord.TextChannel):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("Only a server admin can set this up.", ephemeral=True)
         return
-
-    default_title = "WELCOME TO {server}"
-    default_description = (
-        "• Welcome To **{server}**\n"
-        "⚠️ Enjoy Ur Stay Here\n"
-        "➤ {user}\n"
-        "➤ {username}\n"
-        "➤ Acc Created : {joindate}"
-    )
-    default_ping = "{user} Welcome"
-
-    set_guild_setting(interaction.guild.id, "welcome_channel", channel.id)
-    set_guild_setting(interaction.guild.id, "welcome_title", title or default_title)
-    set_guild_setting(interaction.guild.id, "welcome_message", description or default_description)
-    set_guild_setting(interaction.guild.id, "welcome_ping", ping_text or default_ping)
-    if banner_url:
-        set_guild_setting(interaction.guild.id, "welcome_banner", banner_url)
-
-    await interaction.response.send_message(
-        f"✅ Fancy welcome messages will now be sent in {channel.mention}. "
-        f"Try having someone join (or use a test account) to see it!",
-        ephemeral=True,
-    )
+    await interaction.response.send_modal(WelcomeModal(channel))
 
 
 @bot.tree.command(name="setgoodbye", description="Set the channel and message for when members leave")
-@app_commands.describe(
-    channel="Which channel should goodbye messages go in?",
-    message="Use {user}, {username}, {server}, {membercount} as placeholders (optional)",
-)
-async def setgoodbye(interaction: discord.Interaction, channel: discord.TextChannel, message: str = None):
+@app_commands.describe(channel="Which channel should goodbye messages go in?")
+async def setgoodbye(interaction: discord.Interaction, channel: discord.TextChannel):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("Only a server admin can set this up.", ephemeral=True)
         return
-
-    default_message = "👋 **{username}** has left **{server}**. We're now {membercount} members."
-    set_guild_setting(interaction.guild.id, "goodbye_channel", channel.id)
-    set_guild_setting(interaction.guild.id, "goodbye_message", message or default_message)
-
-    await interaction.response.send_message(
-        f"✅ Goodbye messages will now be sent in {channel.mention}.", ephemeral=True
-    )
+    await interaction.response.send_modal(GoodbyeModal(channel))
 
 
 @bot.event
@@ -262,7 +290,10 @@ async def on_member_remove(member: discord.Member):
     if channel is None:
         return
 
-    message_template = settings.get("goodbye_message", "👋 **{username}** has left **{server}**.")
+    message_template = settings.get(
+        "goodbye_message",
+        "〻 GOODBYE {username}\n» You have left {server}\n» Thanks for being part of WXRST\n» {membercount} members remain",
+    )
     text = fill_placeholders(message_template, member)
 
     embed = discord.Embed(description=text, color=discord.Color.red())

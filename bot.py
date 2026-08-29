@@ -17,24 +17,17 @@ from discord.ext import commands
 from discord import app_commands
 from dotenv import load_dotenv
 
-# Load secrets from the .env file (never put your token directly in this file)
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-ROLE_ID = int(os.getenv("ROLE_ID", "0"))  # set ROLE_ID in .env to your role's ID number
+ROLE_ID = int(os.getenv("ROLE_ID", "0"))
 
-# "Intents" are permissions the bot needs from Discord.
-# members = the bot is allowed to see the server's member list and their roles.
-# message_content = the bot is allowed to read the text of messages (needed for automod)
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ---------------------------------------------------------------------------
-# SIMPLE SETTINGS STORAGE
-# ---------------------------------------------------------------------------
 import json
 
 CONFIG_FILE = "config.json"
@@ -142,10 +135,6 @@ async def notify(interaction: discord.Interaction, message: str):
     )
 
 
-# ---------------------------------------------------------------------------
-# WELCOMER
-# ---------------------------------------------------------------------------
-
 class WelcomeModal(discord.ui.Modal, title="Welcome Message Setup"):
     embed_title = discord.ui.TextInput(
         label="Title",
@@ -215,27 +204,53 @@ class GoodbyeModal(discord.ui.Modal, title="Goodbye Message Setup"):
         )
 
 
+def resolve_channel(guild: discord.Guild, channel_input: str):
+    """Turn '#channel-name', a raw channel ID, or a channel mention into a real channel."""
+    cleaned = channel_input.strip().strip("<#>")
+    if cleaned.isdigit():
+        return guild.get_channel(int(cleaned))
+    return None
+
+
 @bot.tree.command(name="setwelcome", description="Set up a fancy welcome embed for new members")
-@app_commands.describe(channel="Which channel should welcome messages go in?")
-async def setwelcome(interaction: discord.Interaction, channel: discord.TextChannel):
+@app_commands.describe(channel_id="The channel's ID number (right-click the channel → Copy Channel ID)")
+async def setwelcome(interaction: discord.Interaction, channel_id: str):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("Only a server admin can set this up.", ephemeral=True)
         return
+
+    channel = resolve_channel(interaction.guild, channel_id)
+    if channel is None:
+        await interaction.response.send_message(
+            "I couldn't find that channel. Make sure you pasted the Channel ID number "
+            "(right-click the channel → Copy Channel ID). You may need to turn on Developer Mode first "
+            "in Discord Settings → Advanced.",
+            ephemeral=True,
+        )
+        return
+
     await interaction.response.send_modal(WelcomeModal(channel))
 
 
 @bot.tree.command(name="setgoodbye", description="Set the channel and message for when members leave")
-@app_commands.describe(channel="Which channel should goodbye messages go in?")
-async def setgoodbye(interaction: discord.Interaction, channel: discord.TextChannel):
+@app_commands.describe(channel_id="The channel's ID number (right-click the channel → Copy Channel ID)")
+async def setgoodbye(interaction: discord.Interaction, channel_id: str):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("Only a server admin can set this up.", ephemeral=True)
         return
+
+    channel = resolve_channel(interaction.guild, channel_id)
+    if channel is None:
+        await interaction.response.send_message(
+            "I couldn't find that channel. Make sure you pasted the Channel ID number "
+            "(right-click the channel → Copy Channel ID). You may need to turn on Developer Mode first "
+            "in Discord Settings → Advanced.",
+            ephemeral=True,
+        )
+        return
+
     await interaction.response.send_modal(GoodbyeModal(channel))
 
-
-# ---------------------------------------------------------------------------
-# AUTOROLE
-# ---------------------------------------------------------------------------
 
 @bot.tree.command(name="setautorole", description="Automatically give new members a role when they join")
 @app_commands.describe(role="The role to give automatically (leave empty to turn autorole off)")
@@ -263,10 +278,6 @@ async def setautorole(interaction: discord.Interaction, role: discord.Role = Non
     )
 
 
-# ---------------------------------------------------------------------------
-# AUTONICKNAME
-# ---------------------------------------------------------------------------
-
 @bot.tree.command(name="setautonickname", description="Automatically set a nickname format for new members")
 @app_commands.describe(
     format="Use {username} as a placeholder, e.g. 'New | {username}'. Leave empty to turn off."
@@ -284,10 +295,6 @@ async def setautonickname(interaction: discord.Interaction, format: str = None):
     else:
         await interaction.response.send_message("✅ Autonickname turned off.", ephemeral=True)
 
-
-# ---------------------------------------------------------------------------
-# AUTOMOD
-# ---------------------------------------------------------------------------
 
 @bot.tree.command(name="automod", description="Turn the bad-word and spam filter on or off")
 @app_commands.describe(state="Turn automod on or off")
@@ -457,10 +464,6 @@ async def on_member_remove(member: discord.Member):
     embed.set_thumbnail(url=member.display_avatar.url)
     await channel.send(embed=embed)
 
-
-# ---------------------------------------------------------------------------
-# MODERATION
-# ---------------------------------------------------------------------------
 
 @bot.tree.command(name="kick", description="Kick a member from the server")
 @app_commands.describe(member="Who to kick", reason="Why are you kicking them?")

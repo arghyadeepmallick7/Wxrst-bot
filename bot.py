@@ -997,6 +997,12 @@ DEFAULT_TICKET_CATEGORIES = {
     "report": {"label": "Report", "emoji": "🚨"},
     "partnership": {"label": "Partnership", "emoji": "🤝"},
     "other": {"label": "Other", "emoji": "❓"},
+    "general": {"label": "General", "emoji": "💬"},
+    "team-vs-team": {"label": "Team Vs Team", "emoji": "⚔️"},
+    "giveaway-ping": {"label": "Giveaway Ping", "emoji": "🎉"},
+    "staff-apply": {"label": "Staff Apply", "emoji": "🛡️"},
+    "ally": {"label": "Ally", "emoji": "🤝"},
+    "team-apply": {"label": "Team Apply", "emoji": "👥"},
 }
 TICKET_TRANSCRIPT_DIR = Path("transcripts")
 ticket_creation_locks: dict[int, asyncio.Lock] = {}
@@ -1007,6 +1013,17 @@ def default_ticket_settings() -> dict[str, Any]:
     return {
         "panel_title": "WXRST SUPPORT",
         "panel_description": "Need help? Open a ticket below and our support team will assist you.",
+        "panel_title": "⚡︎ **WXRST TICKET SERVICE** 🎟️",
+        "panel_description": "〻 **Select the ticket type you want to open:**\n"
+        "» 💬 **General** — General questions, inquiries, or assistance.\n"
+        "» ⚔️ **Team Vs Team** — Organize or discuss `Team Vs Team` matches.\n"
+        "» 🎉 **Giveaway Ping** — Claim your giveaway prize or contact staff about a giveaway reward.\n"
+        "» 🛡️ **Staff Apply** — Apply to become a part of the `WXRST` staff team.\n"
+        "» 🤝 **Ally** — Alliance requests and partnership inquiries.\n"
+        "» 👥 **Team Apply** — Apply to join the `WXRST` team and represent the name.\n"
+        "⤫ **Please select the appropriate option below.**\n"
+        "~~Do not open unnecessary tickets.~~\n"
+        "𑣲 **One Team. One Family. One WXRST.** ⚡︎",
         "panel_banner": None,
         "ticket_category_id": None,
         "transcript_channel_id": None,
@@ -1572,6 +1589,7 @@ async def ticketsetup(interaction: discord.Interaction, channel: discord.TextCha
         return
     settings = ticket_settings(interaction.guild.id)
     embed = discord.Embed(title=settings["panel_title"], description=settings["panel_description"] + "\n\nChoose the option that best matches your request.", color=discord.Color.blurple())
+    embed = discord.Embed(title=settings["panel_title"], description=settings["panel_description"], color=discord.Color.blurple())
     if settings.get("panel_banner"):
         embed.set_image(url=settings["panel_banner"])
     embed.set_footer(text="WXRST SUPPORT • Your ticket is private")

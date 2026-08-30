@@ -1,13 +1,46 @@
 """
-Wxrst DM Bot
-------------
-This bot sends a Direct Message (DM) to every member of your server
-who has a specific role (like "wxrst"). You (or another admin) type
-a slash command in your server, and the bot quietly messages everyone
-with that role, one by one, in their DMs.
+WXRST Discord Bot
+-----------------
+Features:
+- /notify
+- /setwelcome
+- /setgoodbye
+- /setautorole
+- /setautonickname
+- /automod
+- /addbadword
+- /removebadword
+- /kick
+- /ban
+- /timeout
+- /warn
+- /warnings
+- /clear
+- /join
 
-You do NOT need to touch this file to use the bot day-to-day.
-You only touch the .env file to set your secret token and role name.
+Music:
+- !play / !p
+- !search
+- !queue / !q
+- !nowplaying / !np
+- !pause
+- !resume
+- !skip / !s
+- !stop
+- !shuffle
+- !clearqueue / !clearq
+- !volume / !vol
+- !replay
+- !connect / !musicjoin
+- !leave / !disconnect / !dc
+- !autoplay
+- !loop
+- !seek
+
+TTS:
+- .Hello everyone
+
+Required packages are in requirements.txt.
 """
 
 import os
@@ -15,6 +48,7 @@ import datetime
 import asyncio
 import json
 import random
+import tempfile
 
 import discord
 from discord.ext import commands
@@ -22,19 +56,40 @@ from discord import app_commands
 from dotenv import load_dotenv
 from gtts import gTTS
 import yt_dlp
+import imageio_ffmpeg
 
+
+# =========================
+# ENVIRONMENT
+# =========================
 
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-ROLE_ID = int(os.getenv("ROLE_ID", "0"))
-GUILD_ID = int(os.getenv("GUILD_ID", "0"))
+
+try:
+    ROLE_ID = int(os.getenv("ROLE_ID", "0"))
+except ValueError:
+    ROLE_ID = 0
+
+try:
+    GUILD_ID = int(os.getenv("GUILD_ID", "0"))
+except ValueError:
+    GUILD_ID = 0
+
+
+# =========================
+# DISCORD BOT
+# =========================
 
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(
+    command_prefix="!",
+    intents=intents
+)
 
 CONFIG_FILE = "config.json"
 
@@ -48,54 +103,115 @@ def load_config():
         return {}
 
     try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+        with open(
+            CONFIG_FILE,
+            "r",
+            encoding="utf-8"
+        ) as f:
             return json.load(f)
-    except (json.JSONDecodeError, OSError):
+
+    except (
+        json.JSONDecodeError,
+        OSError
+    ):
         return {}
 
 
 def save_config(data):
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+    try:
+        with open(
+            CONFIG_FILE,
+            "w",
+            encoding="utf-8"
+        ) as f:
+            json.dump(
+                data,
+                f,
+                indent=2
+            )
+
+    except OSError as e:
+        print(f"Config save error: {e}")
 
 
-def get_guild_settings(guild_id: int) -> dict:
+def get_guild_settings(
+    guild_id: int
+) -> dict:
     config = load_config()
-    return config.get(str(guild_id), {})
+
+    return config.get(
+        str(guild_id),
+        {}
+    )
 
 
-def set_guild_setting(guild_id: int, key: str, value):
+def set_guild_setting(
+    guild_id: int,
+    key: str,
+    value
+):
     config = load_config()
+
     guild_key = str(guild_id)
 
     if guild_key not in config:
         config[guild_key] = {}
 
     config[guild_key][key] = value
+
     save_config(config)
 
 
 def ordinal(n: int) -> str:
     if 11 <= (n % 100) <= 13:
         suffix = "th"
+
     else:
         suffix = {
             1: "st",
             2: "nd",
             3: "rd"
-        }.get(n % 10, "th")
+        }.get(
+            n % 10,
+            "th"
+        )
 
     return f"{n}{suffix}"
 
 
-def fill_placeholders(text: str, member: discord.Member) -> str:
+def fill_placeholders(
+    text: str,
+    member: discord.Member
+) -> str:
+
     return (
-        text.replace("{user}", member.mention)
-        .replace("{username}", member.name)
-        .replace("{server}", member.guild.name)
-        .replace("{membercount}", str(member.guild.member_count))
-        .replace("{ordinal}", ordinal(member.guild.member_count))
-        .replace("{joindate}", member.created_at.strftime("%d/%b/%Y"))
+        text
+        .replace(
+            "{user}",
+            member.mention
+        )
+        .replace(
+            "{username}",
+            member.name
+        )
+        .replace(
+            "{server}",
+            member.guild.name
+        )
+        .replace(
+            "{membercount}",
+            str(member.guild.member_count)
+        )
+        .replace(
+            "{ordinal}",
+            ordinal(member.guild.member_count)
+        )
+        .replace(
+            "{joindate}",
+            member.joined_at.strftime("%d/%b/%Y")
+            if member.joined_at
+            else "Unknown"
+        )
     )
 
 
@@ -105,29 +221,76 @@ def fill_placeholders(text: str, member: discord.Member) -> str:
 
 @bot.event
 async def on_ready():
-    print(f"✅ Logged in as {bot.user} (ready to work!)")
+
+    print(
+        f"Logged in as {bot.user} "
+        f"(ID: {bot.user.id})"
+    )
 
     try:
         synced = await bot.tree.sync()
-        print(f"✅ Synced {len(synced)} slash command(s)")
+
+        print(
+            f"Synced {len(synced)} slash command(s)"
+        )
+
     except Exception as e:
-        print(f"⚠️ Could not sync commands: {e}")
+
+        print(
+            f"Could not sync commands: {e}"
+        )
+
+    try:
+        print(
+            f"FFmpeg path: {imageio_ffmpeg.get_ffmpeg_exe()}"
+        )
+
+    except Exception as e:
+
+        print(
+            f"FFmpeg detection error: {e}"
+        )
 
 
 @bot.event
-async def on_guild_join(guild: discord.Guild):
+async def on_guild_join(
+    guild: discord.Guild
+):
+
     if GUILD_ID and guild.id != GUILD_ID:
-        print(f"🚪 Leaving unauthorized server: {guild.name} ({guild.id})")
-        await guild.leave()
+
+        print(
+            f"Leaving unauthorized server: "
+            f"{guild.name} ({guild.id})"
+        )
+
+        try:
+            await guild.leave()
+
+        except Exception as e:
+            print(
+                f"Could not leave server: {e}"
+            )
 
 
 @bot.tree.interaction_check
-async def block_other_servers(interaction: discord.Interaction) -> bool:
-    if GUILD_ID and interaction.guild and interaction.guild.id != GUILD_ID:
-        await interaction.response.send_message(
-            "This bot is private and only works in its home server.",
-            ephemeral=True
-        )
+async def block_other_servers(
+    interaction: discord.Interaction
+) -> bool:
+
+    if (
+        GUILD_ID
+        and interaction.guild
+        and interaction.guild.id != GUILD_ID
+    ):
+
+        if not interaction.response.is_done():
+
+            await interaction.response.send_message(
+                "This bot is private and only works in its home server.",
+                ephemeral=True
+            )
+
         return False
 
     return True
@@ -148,21 +311,38 @@ async def notify(
     interaction: discord.Interaction,
     message: str
 ):
+
     if not interaction.user.guild_permissions.administrator:
+
         await interaction.response.send_message(
             "Sorry, only a server admin can use this command.",
             ephemeral=True
         )
+
         return
 
-    role = interaction.guild.get_role(ROLE_ID)
+    if interaction.guild is None:
 
-    if role is None:
         await interaction.response.send_message(
-            f"I couldn't find a role with ID {ROLE_ID} in this server. "
-            f"Double check the ROLE_ID value in your .env file.",
+            "This command can only be used in a server.",
             ephemeral=True
         )
+
+        return
+
+    role = interaction.guild.get_role(
+        ROLE_ID
+    )
+
+    if role is None:
+
+        await interaction.response.send_message(
+            f"I couldn't find a role with ID {ROLE_ID} "
+            f"in this server. Double check ROLE_ID "
+            f"in your .env file.",
+            ephemeral=True
+        )
+
         return
 
     members = [
@@ -172,14 +352,17 @@ async def notify(
     ]
 
     if not members:
+
         await interaction.response.send_message(
-            f"Nobody currently has the '{role.name}' role, so there's nobody to message.",
+            f"Nobody currently has the "
+            f"'{role.name}' role.",
             ephemeral=True
         )
+
         return
 
     await interaction.response.send_message(
-        "Sending DMs now... 📨",
+        "Sending DMs now...",
         ephemeral=True
     )
 
@@ -187,17 +370,30 @@ async def notify(
     failed = 0
 
     for member in members:
+
         try:
+
             await member.send(
-                f"📢 **Message from {interaction.guild.name}:**\n\n{message}"
+                f"**Message from "
+                f"{interaction.guild.name}:**\n\n"
+                f"{message}"
             )
+
             sent += 1
-        except (discord.Forbidden, discord.HTTPException):
+
+        except (
+            discord.Forbidden,
+            discord.HTTPException
+        ):
+
             failed += 1
 
+        await asyncio.sleep(0.5)
+
     await interaction.followup.send(
-        f"Done! ✅ Sent to **{sent}** members.\n"
-        f"❌ Could not reach **{failed}** members.",
+        f"Done!\n"
+        f"Sent to **{sent}** members.\n"
+        f"Could not reach **{failed}** members.",
         ephemeral=True
     )
 
@@ -210,6 +406,7 @@ class WelcomeModal(
     discord.ui.Modal,
     title="Welcome Message Setup"
 ):
+
     embed_title = discord.ui.TextInput(
         label="Title",
         placeholder="WELCOME TO {server}",
@@ -218,7 +415,7 @@ class WelcomeModal(
     )
 
     description = discord.ui.TextInput(
-        label="Description (press Enter for new lines)",
+        label="Description",
         style=discord.TextStyle.paragraph,
         placeholder=(
             "〻 WELCOME {username}\n"
@@ -230,62 +427,75 @@ class WelcomeModal(
     )
 
     ping_text = discord.ui.TextInput(
-        label="Text shown above the box (optional)",
+        label="Text shown above the box",
         placeholder="{user} Welcome",
         required=False,
         max_length=200
     )
 
     banner_url = discord.ui.TextInput(
-        label="Banner image link (optional)",
+        label="Banner image link",
+        placeholder="https://example.com/image.png",
         required=False,
         max_length=300
     )
 
-    def __init__(self, channel: discord.TextChannel):
+    def __init__(
+        self,
+        channel: discord.TextChannel
+    ):
         super().__init__()
+
         self.channel = channel
 
     async def on_submit(
         self,
         interaction: discord.Interaction
     ):
+
+        guild_id = interaction.guild.id
+
         set_guild_setting(
-            interaction.guild.id,
+            guild_id,
             "welcome_channel",
             self.channel.id
         )
 
         if self.embed_title.value:
+
             set_guild_setting(
-                interaction.guild.id,
+                guild_id,
                 "welcome_title",
                 self.embed_title.value
             )
 
         if self.description.value:
+
             set_guild_setting(
-                interaction.guild.id,
+                guild_id,
                 "welcome_message",
                 self.description.value
             )
 
         if self.ping_text.value:
+
             set_guild_setting(
-                interaction.guild.id,
+                guild_id,
                 "welcome_ping",
                 self.ping_text.value
             )
 
         if self.banner_url.value:
+
             set_guild_setting(
-                interaction.guild.id,
+                guild_id,
                 "welcome_banner",
                 self.banner_url.value
             )
 
         await interaction.response.send_message(
-            f"✅ Welcome messages are set up in {self.channel.mention}!",
+            f"Welcome messages are set up in "
+            f"{self.channel.mention}!",
             ephemeral=True
         )
 
@@ -298,8 +508,9 @@ class GoodbyeModal(
     discord.ui.Modal,
     title="Goodbye Message Setup"
 ):
+
     description = discord.ui.TextInput(
-        label="Message (press Enter for new lines)",
+        label="Message",
         style=discord.TextStyle.paragraph,
         placeholder=(
             "〻 GOODBYE {username}\n"
@@ -310,29 +521,38 @@ class GoodbyeModal(
         max_length=1000
     )
 
-    def __init__(self, channel: discord.TextChannel):
+    def __init__(
+        self,
+        channel: discord.TextChannel
+    ):
         super().__init__()
+
         self.channel = channel
 
     async def on_submit(
         self,
         interaction: discord.Interaction
     ):
+
+        guild_id = interaction.guild.id
+
         set_guild_setting(
-            interaction.guild.id,
+            guild_id,
             "goodbye_channel",
             self.channel.id
         )
 
         if self.description.value:
+
             set_guild_setting(
-                interaction.guild.id,
+                guild_id,
                 "goodbye_message",
                 self.description.value
             )
 
         await interaction.response.send_message(
-            f"✅ Goodbye messages are set up in {self.channel.mention}!",
+            f"Goodbye messages are set up in "
+            f"{self.channel.mention}!",
             ephemeral=True
         )
 
@@ -341,30 +561,42 @@ def resolve_channel(
     guild: discord.Guild,
     channel_input: str
 ):
-    cleaned = channel_input.strip().strip("<#>")
+
+    cleaned = (
+        channel_input
+        .strip()
+        .replace("<#", "")
+        .replace(">", "")
+    )
 
     if cleaned.isdigit():
-        return guild.get_channel(int(cleaned))
+
+        return guild.get_channel(
+            int(cleaned)
+        )
 
     return None
 
 
 @bot.tree.command(
     name="setwelcome",
-    description="Set up a fancy welcome embed for new members"
+    description="Set up a welcome embed"
 )
 @app_commands.describe(
-    channel_id="The channel's ID number"
+    channel_id="The channel ID"
 )
 async def setwelcome(
     interaction: discord.Interaction,
     channel_id: str
 ):
+
     if not interaction.user.guild_permissions.administrator:
+
         await interaction.response.send_message(
             "Only a server admin can set this up.",
             ephemeral=True
         )
+
         return
 
     channel = resolve_channel(
@@ -373,10 +605,25 @@ async def setwelcome(
     )
 
     if channel is None:
+
         await interaction.response.send_message(
-            "I couldn't find that channel. Make sure you pasted the Channel ID number.",
+            "I couldn't find that channel. "
+            "Make sure you pasted the Channel ID.",
             ephemeral=True
         )
+
+        return
+
+    if not isinstance(
+        channel,
+        discord.TextChannel
+    ):
+
+        await interaction.response.send_message(
+            "Please select a normal text channel.",
+            ephemeral=True
+        )
+
         return
 
     await interaction.response.send_modal(
@@ -386,20 +633,23 @@ async def setwelcome(
 
 @bot.tree.command(
     name="setgoodbye",
-    description="Set the channel and message for when members leave"
+    description="Set the goodbye channel and message"
 )
 @app_commands.describe(
-    channel_id="The channel's ID number"
+    channel_id="The channel ID"
 )
 async def setgoodbye(
     interaction: discord.Interaction,
     channel_id: str
 ):
+
     if not interaction.user.guild_permissions.administrator:
+
         await interaction.response.send_message(
             "Only a server admin can set this up.",
             ephemeral=True
         )
+
         return
 
     channel = resolve_channel(
@@ -408,10 +658,25 @@ async def setgoodbye(
     )
 
     if channel is None:
+
         await interaction.response.send_message(
-            "I couldn't find that channel. Make sure you pasted the Channel ID number.",
+            "I couldn't find that channel. "
+            "Make sure you pasted the Channel ID.",
             ephemeral=True
         )
+
+        return
+
+    if not isinstance(
+        channel,
+        discord.TextChannel
+    ):
+
+        await interaction.response.send_message(
+            "Please select a normal text channel.",
+            ephemeral=True
+        )
+
         return
 
     await interaction.response.send_modal(
@@ -425,40 +690,44 @@ async def setgoodbye(
 
 @bot.tree.command(
     name="setautorole",
-    description="Automatically give new members a role when they join"
+    description="Automatically give new members a role"
 )
 @app_commands.describe(
     role="The role to give automatically"
 )
 async def setautorole(
     interaction: discord.Interaction,
-    role: discord.Role = None
+    role: discord.Role
 ):
+
     if not interaction.user.guild_permissions.administrator:
+
         await interaction.response.send_message(
             "Only a server admin can set this up.",
             ephemeral=True
         )
+
         return
 
-    if role is None:
-        set_guild_setting(
-            interaction.guild.id,
-            "autorole_id",
-            None
-        )
+    bot_member = interaction.guild.me
+
+    if bot_member is None:
 
         await interaction.response.send_message(
-            "✅ Autorole turned off.",
+            "I couldn't find my server member information.",
             ephemeral=True
         )
+
         return
 
-    if role >= interaction.guild.me.top_role:
+    if role >= bot_member.top_role:
+
         await interaction.response.send_message(
-            f"⚠️ I can't assign **{role.name}** because it's higher than my own role.",
+            f"I can't assign **{role.name}** "
+            f"because it is higher than my role.",
             ephemeral=True
         )
+
         return
 
     set_guild_setting(
@@ -468,7 +737,8 @@ async def setautorole(
     )
 
     await interaction.response.send_message(
-        f"✅ New members will automatically get the **{role.name}** role.",
+        f"New members will automatically get "
+        f"the **{role.name}** role.",
         ephemeral=True
     )
 
@@ -479,20 +749,23 @@ async def setautorole(
 
 @bot.tree.command(
     name="setautonickname",
-    description="Automatically set a nickname format for new members"
+    description="Set an automatic nickname format"
 )
 @app_commands.describe(
     format="Use {username} as a placeholder"
 )
 async def setautonickname(
     interaction: discord.Interaction,
-    format: str = None
+    format: str
 ):
+
     if not interaction.user.guild_permissions.administrator:
+
         await interaction.response.send_message(
             "Only a server admin can set this up.",
             ephemeral=True
         )
+
         return
 
     set_guild_setting(
@@ -501,16 +774,10 @@ async def setautonickname(
         format
     )
 
-    if format:
-        await interaction.response.send_message(
-            f"✅ New members will be renamed using the format: `{format}`",
-            ephemeral=True
-        )
-    else:
-        await interaction.response.send_message(
-            "✅ Autonickname turned off.",
-            ephemeral=True
-        )
+    await interaction.response.send_message(
+        f"New members will use: `{format}`",
+        ephemeral=True
+    )
 
 
 # =========================
@@ -519,7 +786,7 @@ async def setautonickname(
 
 @bot.tree.command(
     name="automod",
-    description="Turn the bad-word and spam filter on or off"
+    description="Turn automod on or off"
 )
 @app_commands.describe(
     state="Turn automod on or off"
@@ -540,11 +807,14 @@ async def automod(
     interaction: discord.Interaction,
     state: app_commands.Choice[str]
 ):
+
     if not interaction.user.guild_permissions.administrator:
+
         await interaction.response.send_message(
             "Only a server admin can set this up.",
             ephemeral=True
         )
+
         return
 
     set_guild_setting(
@@ -554,14 +824,14 @@ async def automod(
     )
 
     await interaction.response.send_message(
-        f"✅ Automod is now **{state.value}**.",
+        f"Automod is now **{state.value}**.",
         ephemeral=True
     )
 
 
 @bot.tree.command(
     name="addbadword",
-    description="Add a word for automod to delete automatically"
+    description="Add a blocked word"
 )
 @app_commands.describe(
     word="The word to block"
@@ -570,11 +840,14 @@ async def addbadword(
     interaction: discord.Interaction,
     word: str
 ):
+
     if not interaction.user.guild_permissions.administrator:
+
         await interaction.response.send_message(
-            "Only a server admin can set this up.",
+            "Only a server admin can use this.",
             ephemeral=True
         )
+
         return
 
     settings = get_guild_settings(
@@ -589,7 +862,10 @@ async def addbadword(
     word_lower = word.lower()
 
     if word_lower not in bad_words:
-        bad_words.append(word_lower)
+
+        bad_words.append(
+            word_lower
+        )
 
         set_guild_setting(
             interaction.guild.id,
@@ -598,14 +874,14 @@ async def addbadword(
         )
 
     await interaction.response.send_message(
-        f"✅ Added `{word}` to the blocked word list.",
+        f"Added `{word}` to the blocked word list.",
         ephemeral=True
     )
 
 
 @bot.tree.command(
     name="removebadword",
-    description="Remove a word from automod's blocked list"
+    description="Remove a blocked word"
 )
 @app_commands.describe(
     word="The word to unblock"
@@ -614,11 +890,14 @@ async def removebadword(
     interaction: discord.Interaction,
     word: str
 ):
+
     if not interaction.user.guild_permissions.administrator:
+
         await interaction.response.send_message(
-            "Only a server admin can set this up.",
+            "Only a server admin can use this.",
             ephemeral=True
         )
+
         return
 
     settings = get_guild_settings(
@@ -633,7 +912,10 @@ async def removebadword(
     word_lower = word.lower()
 
     if word_lower in bad_words:
-        bad_words.remove(word_lower)
+
+        bad_words.remove(
+            word_lower
+        )
 
         set_guild_setting(
             interaction.guild.id,
@@ -642,10 +924,12 @@ async def removebadword(
         )
 
         await interaction.response.send_message(
-            f"✅ Removed `{word}` from the blocked word list.",
+            f"Removed `{word}` from the blocked list.",
             ephemeral=True
         )
+
     else:
+
         await interaction.response.send_message(
             "That word wasn't on the list.",
             ephemeral=True
@@ -657,18 +941,29 @@ async def removebadword(
 # =========================
 
 recent_messages = {}
+
 tts_queues = {}
+
 music_queues = {}
+
 now_playing = {}
 
+music_locks = {}
 
-YTDL_OPTIONS = {
-    "format": "bestaudio/best",
-    "noplaylist": True,
-    "quiet": True,
-    "default_search": "ytsearch1",
-    "nocheckcertificate": True
-}
+
+# =========================
+# FFMPEG
+# =========================
+
+try:
+
+    FFMPEG_PATH = (
+        imageio_ffmpeg.get_ffmpeg_exe()
+    )
+
+except Exception:
+
+    FFMPEG_PATH = "ffmpeg"
 
 
 FFMPEG_OPTIONS = {
@@ -682,139 +977,266 @@ FFMPEG_OPTIONS = {
 
 
 # =========================
-# MUSIC SEARCH
+# YOUTUBE-DL
 # =========================
 
-def search_song(query: str):
-    with yt_dlp.YoutubeDL(YTDL_OPTIONS) as ydl:
+YTDL_OPTIONS = {
+    "format": "bestaudio/best",
+    "noplaylist": True,
+    "quiet": True,
+    "no_warnings": True,
+    "default_search": "ytsearch1",
+    "nocheckcertificate": True,
+    "source_address": "0.0.0.0"
+}
+
+
+def search_song(
+    query: str
+):
+
+    with yt_dlp.YoutubeDL(
+        YTDL_OPTIONS
+    ) as ydl:
+
         info = ydl.extract_info(
             query,
             download=False
         )
 
         if not info:
-            raise RuntimeError("No result found.")
+
+            raise RuntimeError(
+                "No result found."
+            )
 
         if "entries" in info:
-            entries = info["entries"]
+
+            entries = info.get(
+                "entries"
+            )
 
             if not entries:
-                raise RuntimeError("No result found.")
+
+                raise RuntimeError(
+                    "No result found."
+                )
 
             info = entries[0]
+
+        if not info:
+
+            raise RuntimeError(
+                "No song information found."
+            )
+
+        stream_url = info.get(
+            "url"
+        )
+
+        if not stream_url:
+
+            raise RuntimeError(
+                "No playable audio URL found."
+            )
 
         return {
             "title": info.get(
                 "title",
                 "Unknown title"
             ),
-            "url": info["url"]
+            "url": stream_url,
+            "webpage_url": info.get(
+                "webpage_url"
+            ),
+            "duration": info.get(
+                "duration"
+            )
         }
 
 
 # =========================
-# MUSIC PLAYBACK
+# MUSIC VOICE CLIENT
+# =========================
+
+def get_voice_client(
+    guild: discord.Guild
+):
+
+    return discord.utils.get(
+        bot.voice_clients,
+        guild=guild
+    )
+
+
+async def ensure_music_voice(
+    ctx: commands.Context
+):
+
+    if (
+        ctx.author.voice is None
+        or ctx.author.voice.channel is None
+    ):
+
+        return None
+
+    voice_channel = (
+        ctx.author.voice.channel
+    )
+
+    vc = get_voice_client(
+        ctx.guild
+    )
+
+    if vc is None:
+
+        vc = await voice_channel.connect()
+
+    elif vc.channel != voice_channel:
+
+        await vc.move_to(
+            voice_channel
+        )
+
+    return vc
+
+
+# =========================
+# MUSIC PLAY NEXT
 # =========================
 
 async def play_next_song(
     guild_id: int,
     vc: discord.VoiceClient
 ):
-    queue = music_queues.get(
+
+    if not vc.is_connected():
+
+        now_playing[guild_id] = None
+
+        return
+
+    queue = music_queues.setdefault(
         guild_id,
         []
     )
 
-    if not queue:
-        now_playing[guild_id] = None
-        return
+    while queue:
 
-    if not vc.is_connected():
-        now_playing[guild_id] = None
-        return
+        song = queue.pop(0)
 
-    song = queue.pop(0)
+        if not vc.is_connected():
 
-    now_playing[guild_id] = song
+            now_playing[guild_id] = None
 
-    def after_playing(error):
-        if error:
-            print(
-                f"⚠️ Music playback error: {error}"
-            )
+            return
 
-        future = asyncio.run_coroutine_threadsafe(
-            play_next_song(
-                guild_id,
-                vc
-            ),
-            bot.loop
-        )
+        now_playing[guild_id] = song
+
+        def after_playing(
+            error
+        ):
+
+            if error:
+
+                print(
+                    f"Music playback error: {error}"
+                )
+
+            try:
+
+                asyncio.run_coroutine_threadsafe(
+                    play_next_song(
+                        guild_id,
+                        vc
+                    ),
+                    bot.loop
+                )
+
+            except Exception as e:
+
+                print(
+                    f"Music queue error: {e}"
+                )
 
         try:
-            future.result()
-        except Exception as e:
-            print(
-                f"⚠️ Music follow-up error: {e}"
+
+            source = discord.FFmpegPCMAudio(
+                song["url"],
+                executable=FFMPEG_PATH,
+                **FFMPEG_OPTIONS
             )
 
-    try:
-        source = discord.FFmpegPCMAudio(
-            song["url"],
-            **FFMPEG_OPTIONS
-        )
-
-        vc.play(
-            discord.PCMVolumeTransformer(
+            audio = discord.PCMVolumeTransformer(
                 source,
                 volume=0.5
-            ),
-            after=after_playing
-        )
+            )
 
-    except Exception as e:
-        print(
-            f"⚠️ Could not start music: {e}"
-        )
+            vc.play(
+                audio,
+                after=after_playing
+            )
 
-        now_playing[guild_id] = None
+            return
 
-        await play_next_song(
-            guild_id,
-            vc
-        )
+        except Exception as e:
+
+            print(
+                f"Could not start music: {e}"
+            )
+
+            now_playing[guild_id] = None
+
+    now_playing[guild_id] = None
 
 
 # =========================
-# TTS PLAYBACK
+# TTS PLAY NEXT
 # =========================
 
 async def play_next_tts(
     guild_id: int,
     vc: discord.VoiceClient
 ):
-    queue = tts_queues.get(
+
+    if not vc.is_connected():
+
+        return
+
+    queue = tts_queues.setdefault(
         guild_id,
         []
     )
 
     if not queue:
+
         return
 
-    if not vc.is_connected():
+    if vc.is_playing():
+
         return
 
     text = queue.pop(0)
 
-    filename = f"tts_{guild_id}.mp3"
-
-    def generate_audio():
-        gTTS(
-            text=text,
-            lang="en"
-        ).save(filename)
+    temp_file = None
 
     try:
+
+        fd, temp_file = tempfile.mkstemp(
+            suffix=".mp3"
+        )
+
+        os.close(fd)
+
+        def generate_audio():
+
+            gTTS(
+                text=text,
+                lang="en"
+            ).save(
+                temp_file
+            )
+
         loop = asyncio.get_running_loop()
 
         await loop.run_in_executor(
@@ -823,81 +1245,142 @@ async def play_next_tts(
         )
 
     except Exception as e:
+
         print(
-            f"⚠️ TTS generation error: {e}"
+            f"TTS generation error: {e}"
         )
 
-        await play_next_tts(
-            guild_id,
-            vc
-        )
+        if temp_file:
+
+            try:
+                os.remove(temp_file)
+            except OSError:
+                pass
+
+        if tts_queues.get(guild_id):
+
+            await play_next_tts(
+                guild_id,
+                vc
+            )
 
         return
 
-    def after_playing(error):
+    def after_playing(
+        error
+    ):
+
         if error:
+
             print(
-                f"⚠️ TTS playback error: {error}"
+                f"TTS playback error: {error}"
             )
 
-        future = asyncio.run_coroutine_threadsafe(
-            play_next_tts(
-                guild_id,
-                vc
-            ),
-            bot.loop
-        )
+        try:
+
+            if temp_file and os.path.exists(
+                temp_file
+            ):
+
+                os.remove(
+                    temp_file
+                )
+
+        except OSError:
+
+            pass
 
         try:
-            future.result()
+
+            asyncio.run_coroutine_threadsafe(
+                play_next_tts(
+                    guild_id,
+                    vc
+                ),
+                bot.loop
+            )
+
         except Exception as e:
+
             print(
-                f"⚠️ TTS follow-up error: {e}"
+                f"TTS queue error: {e}"
             )
 
     try:
+
+        source = discord.FFmpegPCMAudio(
+            temp_file,
+            executable=FFMPEG_PATH
+        )
+
         vc.play(
-            discord.FFmpegPCMAudio(
-                filename
-            ),
+            source,
             after=after_playing
         )
 
     except Exception as e:
+
         print(
-            f"⚠️ Could not start TTS: {e}"
+            f"Could not start TTS: {e}"
         )
 
+        try:
+
+            if temp_file and os.path.exists(
+                temp_file
+            ):
+
+                os.remove(
+                    temp_file
+                )
+
+        except OSError:
+
+            pass
+
+
+# =========================
+# HANDLE TTS
+# =========================
 
 async def handle_tts_message(
     message: discord.Message,
     spoken_text: str
 ):
+
     voice_state = message.author.voice
 
-    if voice_state is None or voice_state.channel is None:
+    if (
+        voice_state is None
+        or voice_state.channel is None
+    ):
+
         return
 
     voice_channel = voice_state.channel
 
-    vc = discord.utils.get(
-        bot.voice_clients,
-        guild=message.guild
+    vc = get_voice_client(
+        message.guild
     )
 
     try:
+
         if vc is None:
+
             vc = await voice_channel.connect()
 
         elif vc.channel != voice_channel:
+
             await vc.move_to(
                 voice_channel
             )
 
     except (
         discord.ClientException,
-        discord.Forbidden
+        discord.Forbidden,
+        discord.HTTPException
     ):
+
         return
 
     full_text = (
@@ -908,9 +1391,12 @@ async def handle_tts_message(
     tts_queues.setdefault(
         message.guild.id,
         []
-    ).append(full_text)
+    ).append(
+        full_text
+    )
 
     if not vc.is_playing():
+
         await play_next_tts(
             message.guild.id,
             vc
@@ -925,20 +1411,26 @@ async def handle_tts_message(
 async def on_message(
     message: discord.Message
 ):
+
     if (
         message.author.bot
         or message.guild is None
     ):
+
         return
 
-    # TTS:
-    # .Hello everyone
+    # =========================
+    # TTS
+    # =========================
+
     if message.content.startswith("."):
+
         spoken_text = (
             message.content[1:].strip()
         )
 
         if spoken_text:
+
             await handle_tts_message(
                 message,
                 spoken_text
@@ -954,7 +1446,10 @@ async def on_message(
     # AUTOMOD
     # =========================
 
-    if settings.get("automod_enabled"):
+    if settings.get(
+        "automod_enabled",
+        False
+    ):
 
         if not message.author.guild_permissions.administrator:
 
@@ -971,16 +1466,19 @@ async def on_message(
                 word in content_lower
                 for word in bad_words
             ):
+
                 try:
+
                     await message.delete()
 
                     await message.channel.send(
-                        f"🚫 {message.author.mention}, "
+                        f"{message.author.mention}, "
                         f"that word isn't allowed here.",
                         delete_after=5
                     )
 
                 except discord.Forbidden:
+
                     pass
 
                 return
@@ -1006,22 +1504,26 @@ async def on_message(
                 if now - timestamp < 5
             ]
 
-            timestamps.append(now)
+            timestamps.append(
+                now
+            )
 
             recent_messages[key] = timestamps
 
             if len(timestamps) > 5:
+
                 try:
+
                     await message.delete()
 
                     await message.channel.send(
-                        f"🚫 {message.author.mention}, "
-                        f"please slow down "
-                        f"(you're sending messages too fast).",
+                        f"{message.author.mention}, "
+                        f"please slow down.",
                         delete_after=5
                     )
 
                 except discord.Forbidden:
+
                     pass
 
                 return
@@ -1039,54 +1541,81 @@ async def on_message(
 async def on_member_join(
     member: discord.Member
 ):
+
     settings = get_guild_settings(
         member.guild.id
     )
 
+    # =========================
     # AUTOROLE
+    # =========================
+
     autorole_id = settings.get(
         "autorole_id"
     )
 
     if autorole_id:
+
         role = member.guild.get_role(
             autorole_id
         )
 
         if role:
+
             try:
+
                 await member.add_roles(
                     role,
                     reason="Autorole"
                 )
+
             except discord.Forbidden:
+
                 pass
 
+            except discord.HTTPException:
+
+                pass
+
+    # =========================
     # AUTONICKNAME
+    # =========================
+
     nickname_format = settings.get(
         "autonickname_format"
     )
 
     if nickname_format:
+
         new_nick = fill_placeholders(
             nickname_format,
             member
         )[:32]
 
         try:
+
             await member.edit(
                 nick=new_nick,
                 reason="Autonickname"
             )
-        except discord.Forbidden:
+
+        except (
+            discord.Forbidden,
+            discord.HTTPException
+        ):
+
             pass
 
+    # =========================
     # WELCOME
+    # =========================
+
     channel_id = settings.get(
         "welcome_channel"
     )
 
     if not channel_id:
+
         return
 
     channel = member.guild.get_channel(
@@ -1094,6 +1623,7 @@ async def on_member_join(
     )
 
     if channel is None:
+
         return
 
     title_template = settings.get(
@@ -1148,6 +1678,7 @@ async def on_member_join(
     )
 
     if banner_url:
+
         embed.set_image(
             url=banner_url
         )
@@ -1166,11 +1697,17 @@ async def on_member_join(
     )
 
     try:
+
         await channel.send(
             content=content,
             embed=embed
         )
-    except discord.Forbidden:
+
+    except (
+        discord.Forbidden,
+        discord.HTTPException
+    ):
+
         pass
 
 
@@ -1182,6 +1719,7 @@ async def on_member_join(
 async def on_member_remove(
     member: discord.Member
 ):
+
     settings = get_guild_settings(
         member.guild.id
     )
@@ -1191,6 +1729,7 @@ async def on_member_remove(
     )
 
     if not channel_id:
+
         return
 
     channel = member.guild.get_channel(
@@ -1198,6 +1737,7 @@ async def on_member_remove(
     )
 
     if channel is None:
+
         return
 
     message_template = settings.get(
@@ -1228,10 +1768,16 @@ async def on_member_remove(
     )
 
     try:
+
         await channel.send(
             embed=embed
         )
-    except discord.Forbidden:
+
+    except (
+        discord.Forbidden,
+        discord.HTTPException
+    ):
+
         pass
 
 
@@ -1241,7 +1787,7 @@ async def on_member_remove(
 
 @bot.tree.command(
     name="kick",
-    description="Kick a member from the server"
+    description="Kick a member"
 )
 @app_commands.describe(
     member="Who to kick",
@@ -1252,33 +1798,42 @@ async def kick(
     member: discord.Member,
     reason: str = "No reason given"
 ):
+
     if not interaction.user.guild_permissions.kick_members:
+
         await interaction.response.send_message(
             "You don't have permission to kick members.",
             ephemeral=True
         )
+
         return
 
     if (
         member.top_role >= interaction.user.top_role
         and interaction.user.id != interaction.guild.owner_id
     ):
+
         await interaction.response.send_message(
-            "You can't kick someone with an equal or higher role than you.",
+            "You can't kick someone with an equal "
+            "or higher role than you.",
             ephemeral=True
         )
+
         return
 
     try:
+
         await member.kick(
             reason=f"{reason} (by {interaction.user})"
         )
 
         await interaction.response.send_message(
-            f"👢 Kicked **{member}**. Reason: {reason}"
+            f"Kicked **{member}**.\n"
+            f"Reason: {reason}"
         )
 
     except discord.Forbidden:
+
         await interaction.response.send_message(
             "I don't have permission to kick that member.",
             ephemeral=True
@@ -1287,7 +1842,7 @@ async def kick(
 
 @bot.tree.command(
     name="ban",
-    description="Ban a member from the server"
+    description="Ban a member"
 )
 @app_commands.describe(
     member="Who to ban",
@@ -1298,33 +1853,42 @@ async def ban(
     member: discord.Member,
     reason: str = "No reason given"
 ):
+
     if not interaction.user.guild_permissions.ban_members:
+
         await interaction.response.send_message(
             "You don't have permission to ban members.",
             ephemeral=True
         )
+
         return
 
     if (
         member.top_role >= interaction.user.top_role
         and interaction.user.id != interaction.guild.owner_id
     ):
+
         await interaction.response.send_message(
-            "You can't ban someone with an equal or higher role than you.",
+            "You can't ban someone with an equal "
+            "or higher role than you.",
             ephemeral=True
         )
+
         return
 
     try:
+
         await member.ban(
             reason=f"{reason} (by {interaction.user})"
         )
 
         await interaction.response.send_message(
-            f"🔨 Banned **{member}**. Reason: {reason}"
+            f"Banned **{member}**.\n"
+            f"Reason: {reason}"
         )
 
     except discord.Forbidden:
+
         await interaction.response.send_message(
             "I don't have permission to ban that member.",
             ephemeral=True
@@ -1333,7 +1897,7 @@ async def ban(
 
 @bot.tree.command(
     name="timeout",
-    description="Temporarily mute a member"
+    description="Temporarily timeout a member"
 )
 @app_commands.describe(
     member="Who to timeout",
@@ -1346,37 +1910,47 @@ async def timeout(
     minutes: int,
     reason: str = "No reason given"
 ):
+
     if not interaction.user.guild_permissions.moderate_members:
+
         await interaction.response.send_message(
             "You don't have permission to timeout members.",
             ephemeral=True
         )
+
         return
 
     if minutes <= 0:
+
         await interaction.response.send_message(
             "Minutes must be greater than 0.",
             ephemeral=True
         )
+
         return
 
     duration = (
         discord.utils.utcnow()
-        + datetime.timedelta(minutes=minutes)
+        + datetime.timedelta(
+            minutes=minutes
+        )
     )
 
     try:
+
         await member.edit(
             timed_out_until=duration,
             reason=f"{reason} (by {interaction.user})"
         )
 
         await interaction.response.send_message(
-            f"🔇 Timed out **{member}** for "
-            f"{minutes} minute(s). Reason: {reason}"
+            f"Timed out **{member}** for "
+            f"**{minutes} minute(s)**.\n"
+            f"Reason: {reason}"
         )
 
     except discord.Forbidden:
+
         await interaction.response.send_message(
             "I don't have permission to timeout that member.",
             ephemeral=True
@@ -1396,11 +1970,14 @@ async def warn(
     member: discord.Member,
     reason: str
 ):
+
     if not interaction.user.guild_permissions.moderate_members:
+
         await interaction.response.send_message(
             "You don't have permission to warn members.",
             ephemeral=True
         )
+
         return
 
     config = load_config()
@@ -1426,7 +2003,9 @@ async def warn(
 
     config[guild_key]["warnings"][
         str(member.id)
-    ].append(reason)
+    ].append(
+        reason
+    )
 
     save_config(config)
 
@@ -1437,14 +2016,15 @@ async def warn(
     )
 
     await interaction.response.send_message(
-        f"⚠️ Warned **{member}** "
-        f"(warning #{count}). Reason: {reason}"
+        f"Warned **{member}** "
+        f"(warning #{count}).\n"
+        f"Reason: {reason}"
     )
 
 
 @bot.tree.command(
     name="warnings",
-    description="See a member's past warnings"
+    description="See a member's warnings"
 )
 @app_commands.describe(
     member="Whose warnings to check"
@@ -1453,6 +2033,7 @@ async def warnings(
     interaction: discord.Interaction,
     member: discord.Member
 ):
+
     settings = get_guild_settings(
         interaction.guild.id
     )
@@ -1466,19 +2047,23 @@ async def warnings(
     )
 
     if not member_warnings:
+
         await interaction.response.send_message(
             f"**{member}** has no warnings.",
             ephemeral=True
         )
+
         return
 
     text = "\n".join(
         f"{i + 1}. {reason}"
-        for i, reason in enumerate(member_warnings)
+        for i, reason in enumerate(
+            member_warnings
+        )
     )
 
     await interaction.response.send_message(
-        f"⚠️ Warnings for **{member}**:\n{text}",
+        f"Warnings for **{member}**:\n{text}",
         ephemeral=True
     )
 
@@ -1488,17 +2073,24 @@ async def warnings(
     description="Delete recent messages"
 )
 @app_commands.describe(
-    amount="How many messages to delete (max 100)"
+    amount="How many messages to delete"
 )
 async def clear(
     interaction: discord.Interaction,
-    amount: app_commands.Range[int, 1, 100]
+    amount: app_commands.Range[
+        int,
+        1,
+        100
+    ]
 ):
+
     if not interaction.user.guild_permissions.manage_messages:
+
         await interaction.response.send_message(
             "You don't have permission to delete messages.",
             ephemeral=True
         )
+
         return
 
     await interaction.response.defer(
@@ -1506,16 +2098,18 @@ async def clear(
     )
 
     try:
+
         deleted = await interaction.channel.purge(
             limit=amount
         )
 
         await interaction.followup.send(
-            f"🧹 Deleted {len(deleted)} message(s).",
+            f"Deleted {len(deleted)} message(s).",
             ephemeral=True
         )
 
     except discord.Forbidden:
+
         await interaction.followup.send(
             "I don't have permission to delete messages here.",
             ephemeral=True
@@ -1528,105 +2122,75 @@ async def clear(
 
 @bot.tree.command(
     name="join",
-    description="Make the bot join your current voice channel"
+    description="Make the bot join your voice channel"
 )
 async def join(
     interaction: discord.Interaction
 ):
+
     voice_state = interaction.user.voice
 
     if (
         voice_state is None
         or voice_state.channel is None
     ):
+
         await interaction.response.send_message(
             "You need to be in a voice channel first.",
             ephemeral=True
         )
+
         return
 
     voice_channel = voice_state.channel
 
-    vc = discord.utils.get(
-        bot.voice_clients,
-        guild=interaction.guild
+    vc = get_voice_client(
+        interaction.guild
     )
 
     try:
+
         if vc is None:
+
             await voice_channel.connect()
 
         elif vc.channel != voice_channel:
+
             await vc.move_to(
                 voice_channel
             )
 
         else:
+
             await interaction.response.send_message(
-                f"I'm already in {voice_channel.mention}.",
+                f"I'm already in "
+                f"{voice_channel.mention}.",
                 ephemeral=True
             )
+
             return
 
     except (
         discord.ClientException,
-        discord.Forbidden
+        discord.Forbidden,
+        discord.HTTPException
     ):
+
         await interaction.response.send_message(
             "Something went wrong trying to join.",
             ephemeral=True
         )
+
         return
 
     await interaction.response.send_message(
-        f"✅ Joined {voice_channel.mention}.",
+        f"Joined {voice_channel.mention}.",
         ephemeral=True
     )
 
 
 # =========================
-# MUSIC HELPERS
-# =========================
-
-def get_voice_client(
-    guild: discord.Guild
-):
-    return discord.utils.get(
-        bot.voice_clients,
-        guild=guild
-    )
-
-
-async def ensure_music_voice(
-    ctx: commands.Context
-):
-    if (
-        ctx.author.voice is None
-        or ctx.author.voice.channel is None
-    ):
-        return None
-
-    voice_channel = (
-        ctx.author.voice.channel
-    )
-
-    vc = get_voice_client(
-        ctx.guild
-    )
-
-    if vc is None:
-        vc = await voice_channel.connect()
-
-    elif vc.channel != voice_channel:
-        await vc.move_to(
-            voice_channel
-        )
-
-    return vc
-
-
-# =========================
-# MUSIC: PLAY
+# MUSIC PLAY
 # =========================
 
 @bot.command(
@@ -1638,34 +2202,47 @@ async def play(
     *,
     query: str = None
 ):
+
     if ctx.guild is None:
+
         return
 
     if not query:
+
         await ctx.send(
             "Usage: `!play <song name or YouTube URL>`"
         )
+
         return
 
     if (
         ctx.author.voice is None
         or ctx.author.voice.channel is None
     ):
+
         await ctx.send(
             "You need to be in a voice channel first."
         )
+
         return
 
     try:
+
         vc = await ensure_music_voice(
             ctx
         )
 
         if vc is None:
+
             await ctx.send(
                 "I couldn't join your voice channel."
             )
+
             return
+
+        await ctx.send(
+            "Searching for the song..."
+        )
 
         loop = asyncio.get_running_loop()
 
@@ -1675,18 +2252,28 @@ async def play(
             query
         )
 
-        music_queues.setdefault(
-            ctx.guild.id,
-            []
-        ).append(song)
+        guild_id = ctx.guild.id
 
-        if vc.is_playing() or vc.is_paused():
+        music_queues.setdefault(
+            guild_id,
+            []
+        ).append(
+            song
+        )
+
+        if (
+            vc.is_playing()
+            or vc.is_paused()
+        ):
+
             await ctx.send(
                 f"Queued: **{song['title']}**"
             )
+
         else:
+
             await play_next_song(
-                ctx.guild.id,
+                guild_id,
                 vc
             )
 
@@ -1695,18 +2282,20 @@ async def play(
             )
 
     except Exception as e:
+
         print(
-            f"⚠️ Music play error: {e}"
+            f"Music play error: {type(e).__name__}: {e}"
         )
 
         await ctx.send(
             "I couldn't play that song. "
-            "Check FFmpeg and the music source."
+            "Please check that FFmpeg is installed "
+            "and try another song."
         )
 
 
 # =========================
-# MUSIC: SEARCH
+# MUSIC SEARCH
 # =========================
 
 @bot.command(
@@ -1717,16 +2306,21 @@ async def search(
     *,
     query: str = None
 ):
+
     if ctx.guild is None:
+
         return
 
     if not query:
+
         await ctx.send(
             "Usage: `!search <song name>`"
         )
+
         return
 
     try:
+
         loop = asyncio.get_running_loop()
 
         song = await loop.run_in_executor(
@@ -1740,8 +2334,9 @@ async def search(
         )
 
     except Exception as e:
+
         print(
-            f"⚠️ Music search error: {e}"
+            f"Music search error: {e}"
         )
 
         await ctx.send(
@@ -1750,7 +2345,7 @@ async def search(
 
 
 # =========================
-# MUSIC: QUEUE
+# MUSIC QUEUE
 # =========================
 
 @bot.command(
@@ -1760,7 +2355,9 @@ async def search(
 async def queue(
     ctx: commands.Context
 ):
+
     if ctx.guild is None:
+
         return
 
     current = now_playing.get(
@@ -1775,11 +2372,14 @@ async def queue(
     lines = []
 
     if current:
+
         lines.append(
-            f"**Now playing:** {current['title']}"
+            f"**Now playing:** "
+            f"{current['title']}"
         )
 
     if items:
+
         lines.append(
             "**Up next:**"
         )
@@ -1788,14 +2388,17 @@ async def queue(
             items[:10],
             start=1
         ):
+
             lines.append(
                 f"`{i}.` {song['title']}"
             )
 
     if not lines:
+
         await ctx.send(
             "The music queue is empty."
         )
+
         return
 
     await ctx.send(
@@ -1804,7 +2407,7 @@ async def queue(
 
 
 # =========================
-# MUSIC: NOW PLAYING
+# NOW PLAYING
 # =========================
 
 @bot.command(
@@ -1814,7 +2417,9 @@ async def queue(
 async def nowplaying_command(
     ctx: commands.Context
 ):
+
     if ctx.guild is None:
+
         return
 
     song = now_playing.get(
@@ -1822,9 +2427,11 @@ async def nowplaying_command(
     )
 
     if song is None:
+
         await ctx.send(
             "Nothing is currently playing."
         )
+
         return
 
     await ctx.send(
@@ -1833,7 +2440,7 @@ async def nowplaying_command(
 
 
 # =========================
-# MUSIC: PAUSE
+# PAUSE
 # =========================
 
 @bot.command(
@@ -1842,17 +2449,24 @@ async def nowplaying_command(
 async def pause(
     ctx: commands.Context
 ):
+
     if ctx.guild is None:
+
         return
 
     vc = get_voice_client(
         ctx.guild
     )
 
-    if vc is None or not vc.is_playing():
+    if (
+        vc is None
+        or not vc.is_playing()
+    ):
+
         await ctx.send(
             "Nothing is currently playing."
         )
+
         return
 
     vc.pause()
@@ -1863,7 +2477,7 @@ async def pause(
 
 
 # =========================
-# MUSIC: RESUME
+# RESUME
 # =========================
 
 @bot.command(
@@ -1872,17 +2486,24 @@ async def pause(
 async def resume(
     ctx: commands.Context
 ):
+
     if ctx.guild is None:
+
         return
 
     vc = get_voice_client(
         ctx.guild
     )
 
-    if vc is None or not vc.is_paused():
+    if (
+        vc is None
+        or not vc.is_paused()
+    ):
+
         await ctx.send(
             "Nothing is paused."
         )
+
         return
 
     vc.resume()
@@ -1893,7 +2514,7 @@ async def resume(
 
 
 # =========================
-# MUSIC: SKIP
+# SKIP
 # =========================
 
 @bot.command(
@@ -1903,17 +2524,24 @@ async def resume(
 async def skip(
     ctx: commands.Context
 ):
+
     if ctx.guild is None:
+
         return
 
     vc = get_voice_client(
         ctx.guild
     )
 
-    if vc is None or not vc.is_playing():
+    if (
+        vc is None
+        or not vc.is_playing()
+    ):
+
         await ctx.send(
             "Nothing is currently playing."
         )
+
         return
 
     vc.stop()
@@ -1924,7 +2552,7 @@ async def skip(
 
 
 # =========================
-# MUSIC: STOP
+# STOP
 # =========================
 
 @bot.command(
@@ -1933,32 +2561,48 @@ async def skip(
 async def stop(
     ctx: commands.Context
 ):
+
     if ctx.guild is None:
+
         return
+
+    guild_id = ctx.guild.id
+
+    music_queues[
+        guild_id
+    ] = []
+
+    tts_queues[
+        guild_id
+    ] = []
+
+    now_playing[
+        guild_id
+    ] = None
 
     vc = get_voice_client(
         ctx.guild
     )
 
-    music_queues[
-        ctx.guild.id
-    ] = []
-
-    now_playing[
-        ctx.guild.id
-    ] = None
-
     if vc is None:
+
         await ctx.send(
             "I'm not in a voice channel."
         )
+
         return
 
-    vc.stop()
-
     try:
+
+        vc.stop()
+
         await vc.disconnect()
-    except discord.HTTPException:
+
+    except (
+        discord.HTTPException,
+        discord.ClientException
+    ):
+
         pass
 
     await ctx.send(
@@ -1967,7 +2611,7 @@ async def stop(
 
 
 # =========================
-# MUSIC: SHUFFLE
+# SHUFFLE
 # =========================
 
 @bot.command(
@@ -1976,7 +2620,9 @@ async def stop(
 async def shuffle(
     ctx: commands.Context
 ):
+
     if ctx.guild is None:
+
         return
 
     items = music_queues.get(
@@ -1985,9 +2631,11 @@ async def shuffle(
     )
 
     if len(items) < 2:
+
         await ctx.send(
             "There aren't enough songs in the queue to shuffle."
         )
+
         return
 
     random.shuffle(
@@ -2000,7 +2648,7 @@ async def shuffle(
 
 
 # =========================
-# MUSIC: CLEAR QUEUE
+# CLEAR QUEUE
 # =========================
 
 @bot.command(
@@ -2010,7 +2658,9 @@ async def shuffle(
 async def clearqueue(
     ctx: commands.Context
 ):
+
     if ctx.guild is None:
+
         return
 
     music_queues[
@@ -2023,7 +2673,7 @@ async def clearqueue(
 
 
 # =========================
-# MUSIC: VOLUME
+# VOLUME
 # =========================
 
 @bot.command(
@@ -2034,32 +2684,42 @@ async def volume(
     ctx: commands.Context,
     level: int = None
 ):
+
     if ctx.guild is None:
+
         return
 
     if (
         level is None
         or not 0 <= level <= 150
     ):
+
         await ctx.send(
             "Usage: `!volume <0-150>`"
         )
+
         return
 
     vc = get_voice_client(
         ctx.guild
     )
 
-    if vc is None or vc.source is None:
+    if (
+        vc is None
+        or vc.source is None
+    ):
+
         await ctx.send(
             "Nothing is currently playing."
         )
+
         return
 
     if isinstance(
         vc.source,
         discord.PCMVolumeTransformer
     ):
+
         vc.source.volume = (
             level / 100
         )
@@ -2067,14 +2727,16 @@ async def volume(
         await ctx.send(
             f"Volume set to **{level}%**."
         )
+
     else:
+
         await ctx.send(
             "Nothing is currently playing."
         )
 
 
 # =========================
-# MUSIC: REPLAY
+# REPLAY
 # =========================
 
 @bot.command(
@@ -2083,25 +2745,34 @@ async def volume(
 async def replay(
     ctx: commands.Context
 ):
+
     if ctx.guild is None:
+
         return
 
+    guild_id = ctx.guild.id
+
     song = now_playing.get(
-        ctx.guild.id
+        guild_id
     )
 
     vc = get_voice_client(
         ctx.guild
     )
 
-    if song is None or vc is None:
+    if (
+        song is None
+        or vc is None
+    ):
+
         await ctx.send(
             "Nothing is currently playing."
         )
+
         return
 
     music_queues.setdefault(
-        ctx.guild.id,
+        guild_id,
         []
     ).insert(
         0,
@@ -2116,7 +2787,7 @@ async def replay(
 
 
 # =========================
-# MUSIC: JOIN
+# MUSIC JOIN
 # =========================
 
 @bot.command(
@@ -2126,32 +2797,40 @@ async def replay(
 async def music_join(
     ctx: commands.Context
 ):
+
     if ctx.guild is None:
+
         return
 
     if (
         ctx.author.voice is None
         or ctx.author.voice.channel is None
     ):
+
         await ctx.send(
             "You need to be in a voice channel first."
         )
+
         return
 
     try:
+
         vc = await ensure_music_voice(
             ctx
         )
 
         if vc is not None:
+
             await ctx.send(
-                f"Joined **{ctx.author.voice.channel.name}**."
+                f"Joined **{vc.channel.name}**."
             )
 
     except (
         discord.ClientException,
-        discord.Forbidden
+        discord.Forbidden,
+        discord.HTTPException
     ):
+
         await ctx.send(
             "I couldn't join that voice channel. "
             "Check my Connect and Speak permissions."
@@ -2159,40 +2838,58 @@ async def music_join(
 
 
 # =========================
-# MUSIC: LEAVE
+# MUSIC LEAVE
 # =========================
 
 @bot.command(
     name="leave",
-    aliases=["disconnect", "dc"]
+    aliases=[
+        "disconnect",
+        "dc"
+    ]
 )
 async def music_leave(
     ctx: commands.Context
 ):
+
     if ctx.guild is None:
+
         return
+
+    guild_id = ctx.guild.id
+
+    music_queues[
+        guild_id
+    ] = []
+
+    tts_queues[
+        guild_id
+    ] = []
+
+    now_playing[
+        guild_id
+    ] = None
 
     vc = get_voice_client(
         ctx.guild
     )
 
-    music_queues[
-        ctx.guild.id
-    ] = []
-
-    now_playing[
-        ctx.guild.id
-    ] = None
-
     if vc is None:
+
         await ctx.send(
             "I'm not in a voice channel."
         )
+
         return
 
     try:
+
+        vc.stop()
+
         await vc.disconnect()
+
     except discord.HTTPException:
+
         pass
 
     await ctx.send(
@@ -2201,7 +2898,7 @@ async def music_leave(
 
 
 # =========================
-# MUSIC: AUTOPLAY
+# AUTOPLAY
 # =========================
 
 @bot.command(
@@ -2210,13 +2907,14 @@ async def music_leave(
 async def autoplay(
     ctx: commands.Context
 ):
+
     await ctx.send(
         "Autoplay is not implemented in the current player."
     )
 
 
 # =========================
-# MUSIC: LOOP
+# LOOP
 # =========================
 
 @bot.command(
@@ -2225,13 +2923,14 @@ async def autoplay(
 async def loop_command(
     ctx: commands.Context
 ):
+
     await ctx.send(
         "Loop is not implemented in the current player."
     )
 
 
 # =========================
-# MUSIC: SEEK
+# SEEK
 # =========================
 
 @bot.command(
@@ -2241,13 +2940,14 @@ async def seek(
     ctx: commands.Context,
     percentage: int = None
 ):
+
     await ctx.send(
         "Seek is not available with the current player."
     )
 
 
 # =========================
-# ERROR HANDLER
+# COMMAND ERROR
 # =========================
 
 @bot.event
@@ -2255,32 +2955,50 @@ async def on_command_error(
     ctx: commands.Context,
     error
 ):
+
     if isinstance(
         error,
         commands.CommandNotFound
     ):
+
         return
 
     if isinstance(
         error,
         commands.MissingRequiredArgument
     ):
+
         await ctx.send(
             "You're missing a required argument."
         )
+
         return
 
     if isinstance(
         error,
         commands.BadArgument
     ):
+
         await ctx.send(
             "One of the arguments you entered is invalid."
         )
+
+        return
+
+    if isinstance(
+        error,
+        commands.MissingPermissions
+    ):
+
+        await ctx.send(
+            "You don't have permission to use this command."
+        )
+
         return
 
     print(
-        f"⚠️ Command error in {ctx.command}: {error}"
+        f"Command error in {ctx.command}: "
+        f"{type(error).__name__}: {error}"
     )
 
 
@@ -2289,9 +3007,15 @@ async def on_command_error(
 # =========================
 
 if __name__ == "__main__":
+
     if not TOKEN:
+
         raise SystemExit(
-            "No token found! Open the .env file and put your bot token in DISCORD_TOKEN."
+            "No token found! "
+            "Open the .env file and put your bot token "
+            "in DISCORD_TOKEN."
         )
 
-    bot.run(TOKEN)
+    bot.run(
+        TOKEN
+    )

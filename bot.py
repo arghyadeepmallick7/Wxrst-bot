@@ -991,12 +991,6 @@ async def musichelp(interaction: discord.Interaction) -> None:
 # ---------------------------------------------------------------------------
 
 DEFAULT_TICKET_CATEGORIES = {
-    "support": {"label": "Support", "emoji": "🎫"},
-    "application": {"label": "Team Application", "emoji": "⚔️"},
-    "purchase": {"label": "Purchase / Store", "emoji": "💰"},
-    "report": {"label": "Report", "emoji": "🚨"},
-    "partnership": {"label": "Partnership", "emoji": "🤝"},
-    "other": {"label": "Other", "emoji": "❓"},
     "general": {"label": "General", "emoji": "💬"},
     "team-vs-team": {"label": "Team Vs Team", "emoji": "⚔️"},
     "giveaway-ping": {"label": "Giveaway Ping", "emoji": "🎉"},
@@ -1004,6 +998,26 @@ DEFAULT_TICKET_CATEGORIES = {
     "ally": {"label": "Ally", "emoji": "🤝"},
     "team-apply": {"label": "Team Apply", "emoji": "👥"},
 }
+REMOVED_TICKET_CATEGORY_KEYS = {
+    "support",
+    "application",
+    "purchase",
+    "report",
+    "partnership",
+    "other",
+}
+DEFAULT_TICKET_PANEL_DESCRIPTION = (
+    "〻 **Select the ticket type you want to open:**\n\n"
+    "» 💬 **General** — General questions, inquiries, or assistance.\n\n"
+    "» ⚔️ **Team Vs Team** — Organize or discuss `Team Vs Team` matches.\n\n"
+    "» 🎉 **Giveaway Ping** — Claim your giveaway prize or contact staff about a giveaway reward.\n\n"
+    "» 🛡️ **Staff Apply** — Apply to become a part of the `WXRST` staff team.\n\n"
+    "» 🤝 **Ally** — Alliance requests and partnership inquiries.\n\n"
+    "» 👥 **Team Apply** — Apply to join the `WXRST` team and represent the name.\n\n"
+    "⤫ **Please select the appropriate option below.**\n\n"
+    "~~Do not open unnecessary tickets.~~\n\n"
+    "𑣲 **One Team. One Family. One WXRST.** ⚡︎"
+)
 TICKET_TRANSCRIPT_DIR = Path("transcripts")
 ticket_creation_locks: dict[int, asyncio.Lock] = {}
 registered_ticket_views: set[int] = set()
@@ -1011,19 +1025,8 @@ registered_ticket_views: set[int] = set()
 
 def default_ticket_settings() -> dict[str, Any]:
     return {
-        "panel_title": "WXRST SUPPORT",
-        "panel_description": "Need help? Open a ticket below and our support team will assist you.",
         "panel_title": "⚡︎ **WXRST TICKET SERVICE** 🎟️",
-        "panel_description": "〻 **Select the ticket type you want to open:**\n"
-        "» 💬 **General** — General questions, inquiries, or assistance.\n"
-        "» ⚔️ **Team Vs Team** — Organize or discuss `Team Vs Team` matches.\n"
-        "» 🎉 **Giveaway Ping** — Claim your giveaway prize or contact staff about a giveaway reward.\n"
-        "» 🛡️ **Staff Apply** — Apply to become a part of the `WXRST` staff team.\n"
-        "» 🤝 **Ally** — Alliance requests and partnership inquiries.\n"
-        "» 👥 **Team Apply** — Apply to join the `WXRST` team and represent the name.\n"
-        "⤫ **Please select the appropriate option below.**\n"
-        "~~Do not open unnecessary tickets.~~\n"
-        "𑣲 **One Team. One Family. One WXRST.** ⚡︎",
+        "panel_description": DEFAULT_TICKET_PANEL_DESCRIPTION,
         "panel_banner": None,
         "ticket_category_id": None,
         "transcript_channel_id": None,
@@ -1048,7 +1051,14 @@ def ticket_settings(guild_id: int) -> dict[str, Any]:
     settings = get_guild_settings(guild_id).get("ticket_system", {})
     merged = default_ticket_settings()
     merged.update(settings)
-    merged["categories"] = {**DEFAULT_TICKET_CATEGORIES, **settings.get("categories", {})}
+    if str(settings.get("panel_description", "")).startswith("〻 **Select the ticket type you want to open:**"):
+        merged["panel_description"] = DEFAULT_TICKET_PANEL_DESCRIPTION
+    configured_categories = {
+        key: value
+        for key, value in settings.get("categories", {}).items()
+        if key not in REMOVED_TICKET_CATEGORY_KEYS
+    }
+    merged["categories"] = {**DEFAULT_TICKET_CATEGORIES, **configured_categories}
     merged.setdefault("tickets", {})
     merged.setdefault("ticket_stats", {"staff": {}})
     merged["ticket_stats"].setdefault("staff", {})
@@ -1056,6 +1066,10 @@ def ticket_settings(guild_id: int) -> dict[str, Any]:
 
 
 def save_ticket_settings(guild_id: int, settings: dict[str, Any]) -> None:
+    categories = settings.get("categories", {})
+    settings["categories"] = {
+        key: value for key, value in categories.items() if key not in REMOVED_TICKET_CATEGORY_KEYS
+    }
     set_guild_setting(guild_id, "ticket_system", settings)
 
 
@@ -1588,18 +1602,26 @@ async def ticketsetup(interaction: discord.Interaction, channel: discord.TextCha
         await interaction.response.send_message("Only administrators can set up ticket panels.", ephemeral=True)
         return
     settings = ticket_settings(interaction.guild.id)
-    embed = discord.Embed(title=settings["panel_title"], description=settings["panel_description"] + "\n\nChoose the option that best matches your request.", color=discord.Color.blurple())
     embed = discord.Embed(title=settings["panel_title"], description=settings["panel_description"], color=discord.Color.blurple())
     if settings.get("panel_banner"):
         embed.set_image(url=settings["panel_banner"])
     embed.set_footer(text="WXRST SUPPORT • Your ticket is private")
     try:
-        message = await channel.send(embed=embed, view=TicketPanelView(interaction.guild.id))
+        message = None
+        if settings.get("panel_channel_id") == channel.id and settings.get("panel_message_id"):
+            try:
+                previous = await channel.fetch_message(int(settings["panel_message_id"]))
+                await previous.edit(embed=embed, view=TicketPanelView(interaction.guild.id))
+                message = previous
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                pass
+        if message is None:
+            message = await channel.send(embed=embed, view=TicketPanelView(interaction.guild.id))
         settings["panel_channel_id"] = channel.id
         settings["panel_message_id"] = message.id
         save_ticket_settings(interaction.guild.id, settings)
         bot.add_view(TicketPanelView(interaction.guild.id), message_id=message.id)
-        await interaction.response.send_message(f"✅ Ticket panel sent to {channel.mention}.", ephemeral=True)
+        await interaction.response.send_message(f"✅ Ticket panel updated in {channel.mention}.", ephemeral=True)
     except (discord.Forbidden, discord.HTTPException) as error:
         await interaction.response.send_message("I couldn't send the ticket panel there. Check my channel permissions.", ephemeral=True)
         logger.warning("Ticket panel send failed: %s", error)

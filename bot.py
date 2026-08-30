@@ -19,34 +19,24 @@ from discord import app_commands
 from dotenv import load_dotenv
 from gtts import gTTS
 
-# Load secrets from the .env file (never put your token directly in this file)
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-ROLE_ID = int(os.getenv("ROLE_ID", "0"))  # set ROLE_ID in .env to your role's ID number
-GUILD_ID = int(os.getenv("GUILD_ID", "0"))  # set GUILD_ID in .env to your server's ID number
+ROLE_ID = int(os.getenv("ROLE_ID", "0"))
+GUILD_ID = int(os.getenv("GUILD_ID", "0"))
 
-# "Intents" are permissions the bot needs from Discord.
-# members = the bot is allowed to see the server's member list and their roles.
-# message_content = the bot is allowed to read the text of messages (needed for automod)
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ---------------------------------------------------------------------------
-# SIMPLE SETTINGS STORAGE
-# ---------------------------------------------------------------------------
-# We save each server's welcome/goodbye settings into a small file called
-# config.json, so they don't get erased every time the bot restarts.
 import json
 
 CONFIG_FILE = "config.json"
 
 
 def load_config():
-    """Read config.json from disk. If it doesn't exist yet, start empty."""
     if not os.path.exists(CONFIG_FILE):
         return {}
     with open(CONFIG_FILE, "r") as f:
@@ -54,19 +44,16 @@ def load_config():
 
 
 def save_config(data):
-    """Write the settings back to config.json."""
     with open(CONFIG_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
 
 def get_guild_settings(guild_id: int) -> dict:
-    """Get the settings dict for one server (creates an empty one if needed)."""
     config = load_config()
     return config.get(str(guild_id), {})
 
 
 def set_guild_setting(guild_id: int, key: str, value):
-    """Save one setting (like 'welcome_channel') for one server."""
     config = load_config()
     guild_key = str(guild_id)
     if guild_key not in config:
@@ -76,7 +63,6 @@ def set_guild_setting(guild_id: int, key: str, value):
 
 
 def fill_placeholders(text: str, member: discord.Member) -> str:
-    """Replace {user}, {username}, {server}, {membercount}, {joindate} with real values."""
     return (
         text.replace("{user}", member.mention)
         .replace("{username}", member.name)
@@ -88,7 +74,6 @@ def fill_placeholders(text: str, member: discord.Member) -> str:
 
 
 def ordinal(n: int) -> str:
-    """Turn 222 into '222th', 1 into '1st', 2 into '2nd', 3 into '3rd', etc."""
     if 11 <= (n % 100) <= 13:
         suffix = "th"
     else:
@@ -108,7 +93,6 @@ async def on_ready():
 
 @bot.event
 async def on_guild_join(guild: discord.Guild):
-    """If someone else adds this bot to their own server, leave immediately."""
     if GUILD_ID and guild.id != GUILD_ID:
         print(f"🚪 Leaving unauthorized server: {guild.name} ({guild.id})")
         await guild.leave()
@@ -116,7 +100,6 @@ async def on_guild_join(guild: discord.Guild):
 
 @bot.tree.interaction_check
 async def block_other_servers(interaction: discord.Interaction) -> bool:
-    """Extra safety net: refuse to run any command outside your own server."""
     if GUILD_ID and interaction.guild and interaction.guild.id != GUILD_ID:
         await interaction.response.send_message(
             "This bot is private and only works in its home server.", ephemeral=True
@@ -128,7 +111,6 @@ async def block_other_servers(interaction: discord.Interaction) -> bool:
 @bot.tree.command(name="notify", description="DM everyone who has the special role")
 @app_commands.describe(message="What do you want to tell them? (e.g. 'Come to voice chat now!')")
 async def notify(interaction: discord.Interaction, message: str):
-    # Only let server admins use this command, so random members can't spam DMs
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message(
             "Sorry, only a server admin can use this command.", ephemeral=True
@@ -151,21 +133,19 @@ async def notify(interaction: discord.Interaction, message: str):
         )
         return
 
-    # Let the admin know we're working on it (DMs can take a few seconds for big servers)
     await interaction.response.send_message("Sending DMs now... 📨", ephemeral=True)
 
     sent = 0
     failed = 0
     for member in role.members:
         if member.bot:
-            continue  # never DM other bots
+            continue
         try:
             await member.send(
                 f"📢 **Message from {interaction.guild.name}:**\n\n{message}"
             )
             sent += 1
         except discord.Forbidden:
-            # This happens when someone has DMs turned off, or blocked the bot
             failed += 1
 
     await interaction.followup.send(
@@ -175,15 +155,7 @@ async def notify(interaction: discord.Interaction, message: str):
     )
 
 
-# ---------------------------------------------------------------------------
-# WELCOMER
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
-
 class WelcomeModal(discord.ui.Modal, title="Welcome Message Setup"):
-    """A popup form with real multi-line boxes (Enter key works here!)."""
-
     embed_title = discord.ui.TextInput(
         label="Title",
         placeholder="WELCOME TO {server}",
@@ -230,8 +202,6 @@ class WelcomeModal(discord.ui.Modal, title="Welcome Message Setup"):
 
 
 class GoodbyeModal(discord.ui.Modal, title="Goodbye Message Setup"):
-    """A popup form with real multi-line boxes (Enter key works here!)."""
-
     description = discord.ui.TextInput(
         label="Message (press Enter for new lines)",
         style=discord.TextStyle.paragraph,
@@ -255,7 +225,6 @@ class GoodbyeModal(discord.ui.Modal, title="Goodbye Message Setup"):
 
 
 def resolve_channel(guild: discord.Guild, channel_input: str):
-    """Turn '#channel-name', a raw channel ID, or a channel mention into a real channel."""
     cleaned = channel_input.strip().strip("<#>")
     if cleaned.isdigit():
         return guild.get_channel(int(cleaned))
@@ -302,10 +271,6 @@ async def setgoodbye(interaction: discord.Interaction, channel_id: str):
     await interaction.response.send_modal(GoodbyeModal(channel))
 
 
-# ---------------------------------------------------------------------------
-# AUTOROLE
-# ---------------------------------------------------------------------------
-
 @bot.tree.command(name="setautorole", description="Automatically give new members a role when they join")
 @app_commands.describe(role="The role to give automatically (leave empty to turn autorole off)")
 async def setautorole(interaction: discord.Interaction, role: discord.Role = None):
@@ -318,7 +283,6 @@ async def setautorole(interaction: discord.Interaction, role: discord.Role = Non
         await interaction.response.send_message("✅ Autorole turned off.", ephemeral=True)
         return
 
-    # Make sure the bot's own role is high enough to give out this role
     if role >= interaction.guild.me.top_role:
         await interaction.response.send_message(
             f"⚠️ I can't assign **{role.name}** because it's higher than my own role in the server settings. "
@@ -332,10 +296,6 @@ async def setautorole(interaction: discord.Interaction, role: discord.Role = Non
         f"✅ New members will automatically get the **{role.name}** role.", ephemeral=True
     )
 
-
-# ---------------------------------------------------------------------------
-# AUTONICKNAME
-# ---------------------------------------------------------------------------
 
 @bot.tree.command(name="setautonickname", description="Automatically set a nickname format for new members")
 @app_commands.describe(
@@ -354,10 +314,6 @@ async def setautonickname(interaction: discord.Interaction, format: str = None):
     else:
         await interaction.response.send_message("✅ Autonickname turned off.", ephemeral=True)
 
-
-# ---------------------------------------------------------------------------
-# AUTOMOD
-# ---------------------------------------------------------------------------
 
 @bot.tree.command(name="automod", description="Turn the bad-word and spam filter on or off")
 @app_commands.describe(state="Turn automod on or off")
@@ -409,22 +365,15 @@ async def removebadword(interaction: discord.Interaction, word: str):
         await interaction.response.send_message(f"That word wasn't on the list.", ephemeral=True)
 
 
-# Track recent message times per member, to catch spam (in memory only — resets on restart)
 recent_messages = {}
-tts_queues = {}  # guild_id -> list of text strings waiting to be spoken
+tts_queues = {}
 
 
 async def play_next_tts(guild_id: int, vc: discord.VoiceClient):
-    """Play the next queued TTS message, or disconnect if nothing's left."""
+    """Play the next queued TTS message. Stays connected when the queue empties —
+    only /leave, /disconnect, or /leavevc actually disconnects the bot."""
     queue = tts_queues.get(guild_id, [])
     if not queue:
-        # Nothing left to say — leave the voice channel if we're alone (or after a short wait)
-        await asyncio.sleep(2)
-        if not tts_queues.get(guild_id):
-            try:
-                await vc.disconnect()
-            except Exception:
-                pass
         return
 
     text = queue.pop(0)
@@ -449,10 +398,9 @@ async def play_next_tts(guild_id: int, vc: discord.VoiceClient):
 
 
 async def handle_tts_message(message: discord.Message, spoken_text: str):
-    """Join the author's voice channel (if needed) and speak their message."""
     voice_state = message.author.voice
     if voice_state is None or voice_state.channel is None:
-        return  # they're not in a voice channel, nothing to do
+        return
 
     voice_channel = voice_state.channel
     vc = discord.utils.get(bot.voice_clients, guild=message.guild)
@@ -463,7 +411,7 @@ async def handle_tts_message(message: discord.Message, spoken_text: str):
         elif vc.channel != voice_channel:
             await vc.move_to(voice_channel)
     except discord.ClientException:
-        return  # already connecting/connected weirdly, skip this one
+        return
 
     full_text = f"{message.author.display_name} said {spoken_text}"
     tts_queues.setdefault(message.guild.id, []).append(full_text)
@@ -474,40 +422,35 @@ async def handle_tts_message(message: discord.Message, spoken_text: str):
 
 @bot.event
 async def on_message(message: discord.Message):
-    # Never moderate DMs, other bots, or ourselves
     if message.author.bot or message.guild is None:
         return
 
-    # --- VOICE TEXT-TO-SPEECH: messages starting with "." get spoken in VC ---
     if message.content.startswith("."):
         spoken_text = message.content[1:].strip()
         if spoken_text:
             await handle_tts_message(message, spoken_text)
-        return  # don't run automod or normal commands on TTS messages
+        return
 
     settings = get_guild_settings(message.guild.id)
 
     if settings.get("automod_enabled"):
-        # Admins are exempt from automod so they can always manage the server
         if not message.author.guild_permissions.administrator:
-            # --- Bad word check ---
             bad_words = settings.get("bad_words", [])
             content_lower = message.content.lower()
             if any(word in content_lower for word in bad_words):
                 try:
                     await message.delete()
-                    warning = await message.channel.send(
+                    await message.channel.send(
                         f"🚫 {message.author.mention}, that word isn't allowed here.", delete_after=5
                     )
                 except discord.Forbidden:
                     pass
-                return  # don't also run spam check on a message we just deleted
+                return
 
-            # --- Spam check: more than 5 messages in 5 seconds ---
             key = (message.guild.id, message.author.id)
             now = discord.utils.utcnow().timestamp()
             timestamps = recent_messages.get(key, [])
-            timestamps = [t for t in timestamps if now - t < 5]  # keep only the last 5 seconds
+            timestamps = [t for t in timestamps if now - t < 5]
             timestamps.append(now)
             recent_messages[key] = timestamps
 
@@ -522,7 +465,6 @@ async def on_message(message: discord.Message):
                     pass
                 return
 
-    # Let normal ! commands (if any are added later) keep working
     await bot.process_commands(message)
 
 
@@ -530,7 +472,6 @@ async def on_message(message: discord.Message):
 async def on_member_join(member: discord.Member):
     settings = get_guild_settings(member.guild.id)
 
-    # --- AUTOROLE: give the new member a role automatically ---
     autorole_id = settings.get("autorole_id")
     if autorole_id:
         role = member.guild.get_role(autorole_id)
@@ -538,21 +479,19 @@ async def on_member_join(member: discord.Member):
             try:
                 await member.add_roles(role, reason="Autorole")
             except discord.Forbidden:
-                pass  # bot doesn't have permission to add that role
+                pass
 
-    # --- AUTONICKNAME: force a nickname format automatically ---
     nickname_format = settings.get("autonickname_format")
     if nickname_format:
-        new_nick = fill_placeholders(nickname_format, member)[:32]  # Discord limits nicknames to 32 chars
+        new_nick = fill_placeholders(nickname_format, member)[:32]
         try:
             await member.edit(nick=new_nick, reason="Autonickname")
         except discord.Forbidden:
-            pass  # bot doesn't have permission to rename this member
+            pass
 
-    # --- WELCOMER ---
     channel_id = settings.get("welcome_channel")
     if not channel_id:
-        return  # nothing set up for this server yet
+        return
 
     channel = member.guild.get_channel(channel_id)
     if channel is None:
@@ -586,7 +525,7 @@ async def on_member_remove(member: discord.Member):
     settings = get_guild_settings(member.guild.id)
     channel_id = settings.get("goodbye_channel")
     if not channel_id:
-        return  # nothing set up for this server yet
+        return
 
     channel = member.guild.get_channel(channel_id)
     if channel is None:
@@ -602,10 +541,6 @@ async def on_member_remove(member: discord.Member):
     embed.set_thumbnail(url=member.display_avatar.url)
     await channel.send(embed=embed)
 
-
-# ---------------------------------------------------------------------------
-# MODERATION
-# ---------------------------------------------------------------------------
 
 @bot.tree.command(name="kick", description="Kick a member from the server")
 @app_commands.describe(member="Who to kick", reason="Why are you kicking them?")
@@ -727,13 +662,12 @@ async def join(interaction: discord.Interaction):
 
 
 async def leave_voice_channel(interaction: discord.Interaction):
-    """Shared logic for /leave and /disconnect."""
     vc = discord.utils.get(bot.voice_clients, guild=interaction.guild)
     if vc is None:
         await interaction.response.send_message("I'm not in a voice channel.", ephemeral=True)
         return
 
-    tts_queues[interaction.guild.id] = []  # clear anything queued
+    tts_queues[interaction.guild.id] = []
     await vc.disconnect()
     await interaction.response.send_message("👋 Left the voice channel.", ephemeral=True)
 
@@ -760,7 +694,7 @@ async def skip(interaction: discord.Interaction):
         await interaction.response.send_message("Nothing is being spoken right now.", ephemeral=True)
         return
 
-    vc.stop()  # this automatically triggers play_next_tts() to move to the next one
+    vc.stop()
     await interaction.response.send_message("⏭️ Skipped.", ephemeral=True)
 
 

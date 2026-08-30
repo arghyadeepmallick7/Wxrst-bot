@@ -1,74 +1,65 @@
 """
-Wxrst DM and community bot with a per-server music player.
+Wxrst DM Bot
+------------
+This bot sends a Direct Message (DM) to every member of your server
+who has a specific role (like "wxrst"). You (or another admin) type
+a slash command in your server, and the bot quietly messages everyone
+with that role, one by one, in their DMs.
 
-Secrets belong in .env; this file never stores a Discord token, cookies, or API keys.
+You do NOT need to touch this file to use the bot day-to-day.
+You only touch the .env file to set your secret token and role name.
 """
 
-import asyncio
-import datetime
-import json
-import logging
 import os
-import random
-import shutil
-import time
-from typing import Any, Optional
-
+import datetime
+import asyncio
 import discord
-import yt_dlp
-from discord import app_commands
 from discord.ext import commands
+from discord import app_commands
 from dotenv import load_dotenv
+from gtts import gTTS
 
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 ROLE_ID = int(os.getenv("ROLE_ID", "0"))
 GUILD_ID = int(os.getenv("GUILD_ID", "0"))
-CONFIG_FILE = "config.json"
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("wxrst_bot")
 
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+import json
 
-# ---------------------------------------------------------------------------
-# Existing configuration helpers
-# ---------------------------------------------------------------------------
+CONFIG_FILE = "config.json"
 
-def load_config() -> dict:
+
+def load_config():
     if not os.path.exists(CONFIG_FILE):
         return {}
-    with open(CONFIG_FILE, "r", encoding="utf-8") as file:
-        return json.load(file)
+    with open(CONFIG_FILE, "r") as f:
+        return json.load(f)
 
 
-def save_config(data: dict) -> None:
-    with open(CONFIG_FILE, "w", encoding="utf-8") as file:
-        json.dump(data, file, indent=2)
+def save_config(data):
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(data, f, indent=2)
 
 
 def get_guild_settings(guild_id: int) -> dict:
-    return load_config().get(str(guild_id), {})
+    config = load_config()
+    return config.get(str(guild_id), {})
 
 
-def set_guild_setting(guild_id: int, key: str, value: Any) -> None:
+def set_guild_setting(guild_id: int, key: str, value):
     config = load_config()
     guild_key = str(guild_id)
-    config.setdefault(guild_key, {})[key] = value
+    if guild_key not in config:
+        config[guild_key] = {}
+    config[guild_key][key] = value
     save_config(config)
-
-
-def ordinal(n: int) -> str:
-    if 11 <= n % 100 <= 13:
-        suffix = "th"
-    else:
-        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
-    return f"{n}{suffix}"
 
 
 def fill_placeholders(text: str, member: discord.Member) -> str:
@@ -82,295 +73,26 @@ def fill_placeholders(text: str, member: discord.Member) -> str:
     )
 
 
-def resolve_channel(guild: discord.Guild, channel_input: str) -> Optional[discord.abc.GuildChannel]:
-    cleaned = channel_input.strip().strip("<#>")
-    return guild.get_channel(int(cleaned)) if cleaned.isdigit() else None
+def ordinal(n: int) -> str:
+    if 11 <= (n % 100) <= 13:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
 
-
-# ---------------------------------------------------------------------------
-# Music player
-# ---------------------------------------------------------------------------
-
-YTDL_OPTIONS = {
-    "format": "bestaudio/best",
-    "default_search": "ytsearch",
-    "noplaylist": True,
-    "quiet": True,
-    "no_warnings": True,
-    "skip_download": True,
-    "socket_timeout": 15,
-    "source_address": "0.0.0.0",
-}
-FFMPEG_BEFORE_OPTIONS = "-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
-FFMPEG_OPTIONS = "-vn"
-
-
-class MusicPlayer:
-    """In-memory state for exactly one Discord guild."""
-
-    def __init__(self) -> None:
-        self.queue: list[dict[str, Any]] = []
-        self.current: Optional[dict[str, Any]] = None
-        self.loop_current = False
-        self.volume = 0.5
-        self.lock = asyncio.Lock()
-        self.starting = False
-        self.advance_after_stop = False
-        self.announcement_channel: Optional[discord.abc.Messageable] = None
-
-
-music_players: dict[int, MusicPlayer] = {}
-
-
-def get_player(guild_id: int) -> MusicPlayer:
-    return music_players.setdefault(guild_id, MusicPlayer())
-
-
-def find_ffmpeg() -> Optional[str]:
-    """Use an explicit path, system FFmpeg, then imageio-ffmpeg's bundled binary."""
-    configured = os.getenv("FFMPEG_PATH")
-    if configured and (os.path.isfile(configured) or shutil.which(configured)):
-        return configured
-
-    system_ffmpeg = shutil.which("ffmpeg")
-    if system_ffmpeg:
-        return system_ffmpeg
-
-    try:
-        import imageio_ffmpeg
-
-        bundled_ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-        return bundled_ffmpeg if os.path.isfile(bundled_ffmpeg) else None
-    except Exception as error:  # Missing optional binary must not stop the bot.
-        logger.warning("FFmpeg was not found: %s", error)
-        return None
-
-
-FFMPEG_EXECUTABLE = find_ffmpeg()
-
-
-def format_duration(seconds: Any) -> str:
-    if not isinstance(seconds, (int, float)) or seconds < 0:
-        return "Unknown/live"
-    total = int(seconds)
-    hours, remainder = divmod(total, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    return f"{hours}:{minutes:02}:{seconds:02}" if hours else f"{minutes}:{seconds:02}"
-
-
-def extract_track(query: str, requester: discord.abc.User) -> dict[str, Any]:
-    """Blocking yt-dlp work; callers must use asyncio.to_thread()."""
-    with yt_dlp.YoutubeDL(YTDL_OPTIONS) as ydl:
-        data = ydl.extract_info(query, download=False)
-
-    if data is None:
-        raise RuntimeError("No results were returned.")
-    if "entries" in data:
-        data = next((entry for entry in data["entries"] if entry), None)
-    if not data:
-        raise RuntimeError("No playable result was returned.")
-
-    stream_url = data.get("url")
-    webpage_url = data.get("webpage_url") or data.get("original_url") or query
-    if not stream_url:
-        raise RuntimeError("yt-dlp did not return an audio stream for that result.")
-
-    return {
-        "id": f"{requester.id}:{data.get('id', webpage_url)}:{time.monotonic()}",
-        "title": data.get("title") or "Unknown title",
-        "webpage_url": webpage_url,
-        "stream_url": stream_url,
-        "requester_id": requester.id,
-        "requester_name": getattr(requester, "display_name", str(requester)),
-        "duration": data.get("duration"),
-    }
-
-
-async def notify_music_channel(player: MusicPlayer, message: str) -> None:
-    if player.announcement_channel is None:
-        return
-    try:
-        await player.announcement_channel.send(message)
-    except (discord.HTTPException, discord.Forbidden):
-        pass
-
-
-async def begin_current_track(
-    guild_id: int,
-    voice_client: discord.VoiceClient,
-    track: dict[str, Any],
-) -> None:
-    """Create the FFmpeg stream for a prepared track without blocking Discord."""
-    player = music_players.get(guild_id)
-    if player is None:
-        return
-
-    if not FFMPEG_EXECUTABLE:
-        async with player.lock:
-            if player.current is track:
-                player.current = None
-                player.starting = False
-        await notify_music_channel(
-            player,
-            "⚠️ I cannot play music because FFmpeg is unavailable. Ask the host to install FFmpeg or set `FFMPEG_PATH`.",
-        )
-        return
-
-    async with player.lock:
-        if (
-            player.current is not track
-            or not player.starting
-            or not voice_client.is_connected()
-        ):
-            return
-        volume = player.volume
-
-    try:
-        source = discord.FFmpegPCMAudio(
-            track["stream_url"],
-            executable=FFMPEG_EXECUTABLE,
-            before_options=FFMPEG_BEFORE_OPTIONS,
-            options=FFMPEG_OPTIONS,
-        )
-        audio = discord.PCMVolumeTransformer(source, volume=volume)
-
-        def after_playback(error: Optional[Exception]) -> None:
-            future = asyncio.run_coroutine_threadsafe(
-                after_track(guild_id, voice_client, track, error), bot.loop
-            )
-            future.add_done_callback(log_playback_callback_error)
-
-        voice_client.play(audio, after=after_playback)
-    except (discord.ClientException, OSError, TypeError) as error:
-        logger.exception("Could not begin playback in guild %s", guild_id)
-        async with player.lock:
-            if player.current is track:
-                player.current = None
-                player.starting = False
-        await notify_music_channel(player, f"⚠️ I couldn't start **{track['title']}**. Skipping it.")
-        await start_next_track(guild_id, voice_client)
-        return
-
-    async with player.lock:
-        if player.current is track:
-            player.starting = False
-    await notify_music_channel(
-        player,
-        f"▶️ Now playing: **{track['title']}** — requested by **{track['requester_name']}**",
-    )
-
-
-def log_playback_callback_error(future: "asyncio.Future[Any]") -> None:
-    try:
-        future.result()
-    except Exception:
-        logger.exception("Music playback callback failed")
-
-
-async def start_next_track(guild_id: int, voice_client: discord.VoiceClient) -> None:
-    player = music_players.get(guild_id)
-    if player is None or not voice_client.is_connected():
-        return
-
-    async with player.lock:
-        if player.starting or player.current is not None or voice_client.is_playing() or voice_client.is_paused():
-            return
-        if not player.queue:
-            return
-        track = player.queue.pop(0)
-        player.current = track
-        player.starting = True
-
-    await begin_current_track(guild_id, voice_client, track)
-
-
-async def after_track(
-    guild_id: int,
-    voice_client: discord.VoiceClient,
-    finished_track: dict[str, Any],
-    error: Optional[Exception],
-) -> None:
-    if error:
-        logger.warning("Playback error in guild %s: %s", guild_id, error)
-
-    player = music_players.get(guild_id)
-    if player is None or not voice_client.is_connected():
-        return
-
-    replay_track: Optional[dict[str, Any]] = None
-    start_next = False
-    async with player.lock:
-        if player.current is not finished_track:
-            if player.advance_after_stop:
-                player.advance_after_stop = False
-                start_next = True
-            else:
-                return
-        elif player.loop_current:
-            replay_track = player.current
-            player.starting = True
-        else:
-            player.current = None
-            player.starting = False
-            start_next = True
-
-    if replay_track is not None:
-        await begin_current_track(guild_id, voice_client, replay_track)
-    elif start_next:
-        await start_next_track(guild_id, voice_client)
-
-
-async def connect_to_user_voice(
-    interaction: discord.Interaction,
-) -> tuple[Optional[discord.VoiceClient], Optional[str]]:
-    """Safely return the guild voice client, joining only when there is none."""
-    guild = interaction.guild
-    if guild is None:
-        return None, "Music commands can only be used inside a server."
-
-    voice_client = guild.voice_client
-    if voice_client and voice_client.is_connected():
-        return voice_client, None
-
-    voice_state = getattr(interaction.user, "voice", None)
-    if voice_state is None or voice_state.channel is None:
-        return None, "You need to join a voice channel first."
-
-    try:
-        if voice_client:
-            await voice_client.disconnect(force=True)
-        return await voice_state.channel.connect(timeout=20, reconnect=True), None
-    except (discord.ClientException, discord.HTTPException, OSError, asyncio.TimeoutError) as error:
-        logger.warning("Voice connection failed in guild %s: %s", guild.id, error)
-        failed_client = guild.voice_client
-        if failed_client and not failed_client.is_connected():
-            try:
-                await failed_client.disconnect(force=True)
-            except (discord.ClientException, discord.HTTPException, OSError):
-                pass
-        return None, "I couldn't connect to that voice channel. Please try again in a moment."
-
-
-def require_ffmpeg_message() -> str:
-    return "FFmpeg is unavailable. Install FFmpeg on the server or set `FFMPEG_PATH`, then restart the bot."
-
-
-# ---------------------------------------------------------------------------
-# Bot lifecycle and guild restriction
-# ---------------------------------------------------------------------------
 
 @bot.event
-async def on_ready() -> None:
+async def on_ready():
     print(f"✅ Logged in as {bot.user} (ready to work!)")
     try:
         synced = await bot.tree.sync()
         print(f"✅ Synced {len(synced)} slash command(s)")
-    except Exception as error:
-        print(f"⚠️ Could not sync commands: {error}")
+    except Exception as e:
+        print(f"⚠️ Could not sync commands: {e}")
 
 
 @bot.event
-async def on_guild_join(guild: discord.Guild) -> None:
+async def on_guild_join(guild: discord.Guild):
     if GUILD_ID and guild.id != GUILD_ID:
         print(f"🚪 Leaving unauthorized server: {guild.name} ({guild.id})")
         await guild.leave()
@@ -378,10 +100,7 @@ async def on_guild_join(guild: discord.Guild) -> None:
 
 @bot.tree.interaction_check
 async def block_other_servers(interaction: discord.Interaction) -> bool:
-    if interaction.guild is None:
-        await interaction.response.send_message("This bot only works inside its server.", ephemeral=True)
-        return False
-    if GUILD_ID and interaction.guild.id != GUILD_ID:
+    if GUILD_ID and interaction.guild and interaction.guild.id != GUILD_ID:
         await interaction.response.send_message(
             "This bot is private and only works in its home server.", ephemeral=True
         )
@@ -389,58 +108,84 @@ async def block_other_servers(interaction: discord.Interaction) -> bool:
     return True
 
 
-# ---------------------------------------------------------------------------
-# Existing notification, welcome, autorole, autonickname, and automod features
-# ---------------------------------------------------------------------------
-
 @bot.tree.command(name="notify", description="DM everyone who has the special role")
 @app_commands.describe(message="What do you want to tell them? (e.g. 'Come to voice chat now!')")
-async def notify(interaction: discord.Interaction, message: str) -> None:
+async def notify(interaction: discord.Interaction, message: str):
     if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("Sorry, only a server admin can use this command.", ephemeral=True)
+        await interaction.response.send_message(
+            "Sorry, only a server admin can use this command.", ephemeral=True
+        )
         return
 
     role = interaction.guild.get_role(ROLE_ID)
     if role is None:
         await interaction.response.send_message(
-            f"I couldn't find a role with ID {ROLE_ID} in this server. Double check ROLE_ID in .env.",
+            f"I couldn't find a role with ID {ROLE_ID} in this server. "
+            f"Double check the ROLE_ID value in your .env file.",
             ephemeral=True,
         )
         return
-    if not role.members:
+
+    if len(role.members) == 0:
         await interaction.response.send_message(
-            f"Nobody currently has the '{role.name}' role, so there's nobody to message.", ephemeral=True
+            f"Nobody currently has the '{role.name}' role, so there's nobody to message.",
+            ephemeral=True,
         )
         return
 
     await interaction.response.send_message("Sending DMs now... 📨", ephemeral=True)
-    sent = failed = 0
+
+    sent = 0
+    failed = 0
     for member in role.members:
         if member.bot:
             continue
         try:
-            await member.send(f"📢 **Message from {interaction.guild.name}:**\n\n{message}")
+            await member.send(
+                f"📢 **Message from {interaction.guild.name}:**\n\n{message}"
+            )
             sent += 1
         except discord.Forbidden:
             failed += 1
 
     await interaction.followup.send(
-        f"Done! ✅ Sent to **{sent}** members.\n❌ Could not reach **{failed}** members (their DMs are probably closed).",
+        f"Done! ✅ Sent to **{sent}** members.\n"
+        f"❌ Could not reach **{failed}** members (their DMs are probably closed).",
         ephemeral=True,
     )
 
 
 class WelcomeModal(discord.ui.Modal, title="Welcome Message Setup"):
-    embed_title = discord.ui.TextInput(label="Title", placeholder="WELCOME TO {server}", required=False, max_length=100)
-    description = discord.ui.TextInput(label="Description (press Enter for new lines)", style=discord.TextStyle.paragraph, placeholder="〻 WELCOME {username}\n» You joined {server}\n» {membercount} members now", required=False, max_length=1000)
-    ping_text = discord.ui.TextInput(label="Text shown above the box (optional)", placeholder="{user} Welcome", required=False, max_length=200)
-    banner_url = discord.ui.TextInput(label="Banner image link (optional)", required=False, max_length=300)
+    embed_title = discord.ui.TextInput(
+        label="Title",
+        placeholder="WELCOME TO {server}",
+        required=False,
+        max_length=100,
+    )
+    description = discord.ui.TextInput(
+        label="Description (press Enter for new lines)",
+        style=discord.TextStyle.paragraph,
+        placeholder="〻 WELCOME {username}\n» You joined {server}\n» {membercount} members now",
+        required=False,
+        max_length=1000,
+    )
+    ping_text = discord.ui.TextInput(
+        label="Text shown above the box (optional)",
+        placeholder="{user} Welcome",
+        required=False,
+        max_length=200,
+    )
+    banner_url = discord.ui.TextInput(
+        label="Banner image link (optional)",
+        required=False,
+        max_length=300,
+    )
 
-    def __init__(self, channel: discord.TextChannel) -> None:
+    def __init__(self, channel: discord.TextChannel):
         super().__init__()
         self.channel = channel
 
-    async def on_submit(self, interaction: discord.Interaction) -> None:
+    async def on_submit(self, interaction: discord.Interaction):
         set_guild_setting(interaction.guild.id, "welcome_channel", self.channel.id)
         if self.embed_title.value:
             set_guild_setting(interaction.guild.id, "welcome_title", self.embed_title.value)
@@ -450,109 +195,165 @@ class WelcomeModal(discord.ui.Modal, title="Welcome Message Setup"):
             set_guild_setting(interaction.guild.id, "welcome_ping", self.ping_text.value)
         if self.banner_url.value:
             set_guild_setting(interaction.guild.id, "welcome_banner", self.banner_url.value)
-        await interaction.response.send_message(f"✅ Welcome messages are set up in {self.channel.mention}!", ephemeral=True)
+
+        await interaction.response.send_message(
+            f"✅ Welcome messages are set up in {self.channel.mention}!", ephemeral=True
+        )
 
 
 class GoodbyeModal(discord.ui.Modal, title="Goodbye Message Setup"):
-    description = discord.ui.TextInput(label="Message (press Enter for new lines)", style=discord.TextStyle.paragraph, placeholder="〻 GOODBYE {username}\n» You have left {server}\n» {membercount} members remain", required=False, max_length=1000)
+    description = discord.ui.TextInput(
+        label="Message (press Enter for new lines)",
+        style=discord.TextStyle.paragraph,
+        placeholder="〻 GOODBYE {username}\n» You have left {server}\n» {membercount} members remain",
+        required=False,
+        max_length=1000,
+    )
 
-    def __init__(self, channel: discord.TextChannel) -> None:
+    def __init__(self, channel: discord.TextChannel):
         super().__init__()
         self.channel = channel
 
-    async def on_submit(self, interaction: discord.Interaction) -> None:
+    async def on_submit(self, interaction: discord.Interaction):
         set_guild_setting(interaction.guild.id, "goodbye_channel", self.channel.id)
         if self.description.value:
             set_guild_setting(interaction.guild.id, "goodbye_message", self.description.value)
-        await interaction.response.send_message(f"✅ Goodbye messages are set up in {self.channel.mention}!", ephemeral=True)
+
+        await interaction.response.send_message(
+            f"✅ Goodbye messages are set up in {self.channel.mention}!", ephemeral=True
+        )
+
+
+def resolve_channel(guild: discord.Guild, channel_input: str):
+    cleaned = channel_input.strip().strip("<#>")
+    if cleaned.isdigit():
+        return guild.get_channel(int(cleaned))
+    return None
 
 
 @bot.tree.command(name="setwelcome", description="Set up a fancy welcome embed for new members")
 @app_commands.describe(channel_id="The channel's ID number (right-click the channel → Copy Channel ID)")
-async def setwelcome(interaction: discord.Interaction, channel_id: str) -> None:
+async def setwelcome(interaction: discord.Interaction, channel_id: str):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("Only a server admin can set this up.", ephemeral=True)
         return
+
     channel = resolve_channel(interaction.guild, channel_id)
     if channel is None:
-        await interaction.response.send_message("I couldn't find that channel. Paste its Channel ID and enable Developer Mode if needed.", ephemeral=True)
+        await interaction.response.send_message(
+            "I couldn't find that channel. Make sure you pasted the Channel ID number "
+            "(right-click the channel → Copy Channel ID). You may need to turn on Developer Mode first "
+            "in Discord Settings → Advanced.",
+            ephemeral=True,
+        )
         return
+
     await interaction.response.send_modal(WelcomeModal(channel))
 
 
 @bot.tree.command(name="setgoodbye", description="Set the channel and message for when members leave")
 @app_commands.describe(channel_id="The channel's ID number (right-click the channel → Copy Channel ID)")
-async def setgoodbye(interaction: discord.Interaction, channel_id: str) -> None:
+async def setgoodbye(interaction: discord.Interaction, channel_id: str):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("Only a server admin can set this up.", ephemeral=True)
         return
+
     channel = resolve_channel(interaction.guild, channel_id)
     if channel is None:
-        await interaction.response.send_message("I couldn't find that channel. Paste its Channel ID and enable Developer Mode if needed.", ephemeral=True)
+        await interaction.response.send_message(
+            "I couldn't find that channel. Make sure you pasted the Channel ID number "
+            "(right-click the channel → Copy Channel ID). You may need to turn on Developer Mode first "
+            "in Discord Settings → Advanced.",
+            ephemeral=True,
+        )
         return
+
     await interaction.response.send_modal(GoodbyeModal(channel))
 
 
 @bot.tree.command(name="setautorole", description="Automatically give new members a role when they join")
 @app_commands.describe(role="The role to give automatically (leave empty to turn autorole off)")
-async def setautorole(interaction: discord.Interaction, role: Optional[discord.Role] = None) -> None:
+async def setautorole(interaction: discord.Interaction, role: discord.Role = None):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("Only a server admin can set this up.", ephemeral=True)
         return
+
     if role is None:
         set_guild_setting(interaction.guild.id, "autorole_id", None)
         await interaction.response.send_message("✅ Autorole turned off.", ephemeral=True)
         return
+
     if role >= interaction.guild.me.top_role:
-        await interaction.response.send_message(f"⚠️ I can't assign **{role.name}** because it is higher than my role. Move my role above it.", ephemeral=True)
+        await interaction.response.send_message(
+            f"⚠️ I can't assign **{role.name}** because it's higher than my own role in the server settings. "
+            f"Move my bot's role above it in Server Settings → Roles.",
+            ephemeral=True,
+        )
         return
+
     set_guild_setting(interaction.guild.id, "autorole_id", role.id)
-    await interaction.response.send_message(f"✅ New members will automatically get the **{role.name}** role.", ephemeral=True)
+    await interaction.response.send_message(
+        f"✅ New members will automatically get the **{role.name}** role.", ephemeral=True
+    )
 
 
 @bot.tree.command(name="setautonickname", description="Automatically set a nickname format for new members")
-@app_commands.describe(format="Use {username}, e.g. 'New | {username}'. Leave empty to turn off.")
-async def setautonickname(interaction: discord.Interaction, format: Optional[str] = None) -> None:
+@app_commands.describe(
+    format="Use {username} as a placeholder, e.g. 'New | {username}'. Leave empty to turn off."
+)
+async def setautonickname(interaction: discord.Interaction, format: str = None):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("Only a server admin can set this up.", ephemeral=True)
         return
+
     set_guild_setting(interaction.guild.id, "autonickname_format", format)
-    message = f"✅ New members will be renamed using: `{format}`" if format else "✅ Autonickname turned off."
-    await interaction.response.send_message(message, ephemeral=True)
+    if format:
+        await interaction.response.send_message(
+            f"✅ New members will be renamed using the format: `{format}`", ephemeral=True
+        )
+    else:
+        await interaction.response.send_message("✅ Autonickname turned off.", ephemeral=True)
 
 
 @bot.tree.command(name="automod", description="Turn the bad-word and spam filter on or off")
 @app_commands.describe(state="Turn automod on or off")
-@app_commands.choices(state=[app_commands.Choice(name="on", value="on"), app_commands.Choice(name="off", value="off")])
-async def automod(interaction: discord.Interaction, state: app_commands.Choice[str]) -> None:
+@app_commands.choices(state=[
+    app_commands.Choice(name="on", value="on"),
+    app_commands.Choice(name="off", value="off"),
+])
+async def automod(interaction: discord.Interaction, state: app_commands.Choice[str]):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("Only a server admin can set this up.", ephemeral=True)
         return
+
     set_guild_setting(interaction.guild.id, "automod_enabled", state.value == "on")
     await interaction.response.send_message(f"✅ Automod is now **{state.value}**.", ephemeral=True)
 
 
 @bot.tree.command(name="addbadword", description="Add a word for automod to delete automatically")
 @app_commands.describe(word="The word to block")
-async def addbadword(interaction: discord.Interaction, word: str) -> None:
+async def addbadword(interaction: discord.Interaction, word: str):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("Only a server admin can set this up.", ephemeral=True)
         return
+
     settings = get_guild_settings(interaction.guild.id)
     bad_words = settings.get("bad_words", [])
     word_lower = word.lower()
     if word_lower not in bad_words:
         bad_words.append(word_lower)
         set_guild_setting(interaction.guild.id, "bad_words", bad_words)
+
     await interaction.response.send_message(f"✅ Added `{word}` to the blocked word list.", ephemeral=True)
 
 
 @bot.tree.command(name="removebadword", description="Remove a word from automod's blocked list")
 @app_commands.describe(word="The word to unblock")
-async def removebadword(interaction: discord.Interaction, word: str) -> None:
+async def removebadword(interaction: discord.Interaction, word: str):
     if not interaction.user.guild_permissions.administrator:
         await interaction.response.send_message("Only a server admin can set this up.", ephemeral=True)
         return
+
     settings = get_guild_settings(interaction.guild.id)
     bad_words = settings.get("bad_words", [])
     word_lower = word.lower()
@@ -561,47 +362,116 @@ async def removebadword(interaction: discord.Interaction, word: str) -> None:
         set_guild_setting(interaction.guild.id, "bad_words", bad_words)
         await interaction.response.send_message(f"✅ Removed `{word}` from the blocked word list.", ephemeral=True)
     else:
-        await interaction.response.send_message("That word wasn't on the list.", ephemeral=True)
+        await interaction.response.send_message(f"That word wasn't on the list.", ephemeral=True)
 
 
-recent_messages: dict[tuple[int, int], list[float]] = {}
+recent_messages = {}
+tts_queues = {}
+
+
+async def play_next_tts(guild_id: int, vc: discord.VoiceClient):
+    """Play the next queued TTS message. Stays connected when the queue empties —
+    only /leave, /disconnect, or /leavevc actually disconnects the bot."""
+    queue = tts_queues.get(guild_id, [])
+    if not queue:
+        return
+
+    text = queue.pop(0)
+    filename = f"tts_{guild_id}.mp3"
+
+    def generate_audio():
+        gTTS(text=text, lang="en").save(filename)
+
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, generate_audio)
+
+    def after_playing(error):
+        if error:
+            print(f"⚠️ TTS playback error: {error}")
+        fut = asyncio.run_coroutine_threadsafe(play_next_tts(guild_id, vc), bot.loop)
+        try:
+            fut.result()
+        except Exception as e:
+            print(f"⚠️ TTS follow-up error: {e}")
+
+    vc.play(discord.FFmpegPCMAudio(filename), after=after_playing)
+
+
+async def handle_tts_message(message: discord.Message, spoken_text: str):
+    voice_state = message.author.voice
+    if voice_state is None or voice_state.channel is None:
+        return
+
+    voice_channel = voice_state.channel
+    vc = discord.utils.get(bot.voice_clients, guild=message.guild)
+
+    try:
+        if vc is None:
+            vc = await voice_channel.connect()
+        elif vc.channel != voice_channel:
+            await vc.move_to(voice_channel)
+    except discord.ClientException:
+        return
+
+    full_text = f"{message.author.display_name} said {spoken_text}"
+    tts_queues.setdefault(message.guild.id, []).append(full_text)
+
+    if not vc.is_playing():
+        await play_next_tts(message.guild.id, vc)
 
 
 @bot.event
-async def on_message(message: discord.Message) -> None:
+async def on_message(message: discord.Message):
     if message.author.bot or message.guild is None:
         return
 
-    settings = get_guild_settings(message.guild.id)
-    if settings.get("automod_enabled") and not message.author.guild_permissions.administrator:
-        bad_words = settings.get("bad_words", [])
-        if any(word in message.content.lower() for word in bad_words):
-            try:
-                await message.delete()
-                await message.channel.send(f"🚫 {message.author.mention}, that word isn't allowed here.", delete_after=5)
-            except discord.Forbidden:
-                pass
-            return
+    if message.content.startswith("."):
+        spoken_text = message.content[1:].strip()
+        if spoken_text:
+            await handle_tts_message(message, spoken_text)
+        return
 
-        key = (message.guild.id, message.author.id)
-        now = discord.utils.utcnow().timestamp()
-        timestamps = [stamp for stamp in recent_messages.get(key, []) if now - stamp < 5]
-        timestamps.append(now)
-        recent_messages[key] = timestamps
-        if len(timestamps) > 5:
-            try:
-                await message.delete()
-                await message.channel.send(f"🚫 {message.author.mention}, please slow down (you're sending messages too fast).", delete_after=5)
-            except discord.Forbidden:
-                pass
-            return
+    settings = get_guild_settings(message.guild.id)
+
+    if settings.get("automod_enabled"):
+        if not message.author.guild_permissions.administrator:
+            bad_words = settings.get("bad_words", [])
+            content_lower = message.content.lower()
+            if any(word in content_lower for word in bad_words):
+                try:
+                    await message.delete()
+                    await message.channel.send(
+                        f"🚫 {message.author.mention}, that word isn't allowed here.", delete_after=5
+                    )
+                except discord.Forbidden:
+                    pass
+                return
+
+            key = (message.guild.id, message.author.id)
+            now = discord.utils.utcnow().timestamp()
+            timestamps = recent_messages.get(key, [])
+            timestamps = [t for t in timestamps if now - t < 5]
+            timestamps.append(now)
+            recent_messages[key] = timestamps
+
+            if len(timestamps) > 5:
+                try:
+                    await message.delete()
+                    await message.channel.send(
+                        f"🚫 {message.author.mention}, please slow down (you're sending messages too fast).",
+                        delete_after=5,
+                    )
+                except discord.Forbidden:
+                    pass
+                return
 
     await bot.process_commands(message)
 
 
 @bot.event
-async def on_member_join(member: discord.Member) -> None:
+async def on_member_join(member: discord.Member):
     settings = get_guild_settings(member.guild.id)
+
     autorole_id = settings.get("autorole_id")
     if autorole_id:
         role = member.guild.get_role(autorole_id)
@@ -613,50 +483,75 @@ async def on_member_join(member: discord.Member) -> None:
 
     nickname_format = settings.get("autonickname_format")
     if nickname_format:
+        new_nick = fill_placeholders(nickname_format, member)[:32]
         try:
-            await member.edit(nick=fill_placeholders(nickname_format, member)[:32], reason="Autonickname")
+            await member.edit(nick=new_nick, reason="Autonickname")
         except discord.Forbidden:
             pass
 
     channel_id = settings.get("welcome_channel")
-    if not channel_id or (channel := member.guild.get_channel(channel_id)) is None:
+    if not channel_id:
         return
+
+    channel = member.guild.get_channel(channel_id)
+    if channel is None:
+        return
+
     title_template = settings.get("welcome_title", "WELCOME TO {server}")
-    description_template = settings.get("welcome_message", "• Welcome To **{server}**\n⚠️ Enjoy Ur Stay Here\n➤ {user}\n➤ {username}\n➤ Acc Created : {joindate}")
-    embed = discord.Embed(title=fill_placeholders(title_template, member), description=fill_placeholders(description_template, member), color=discord.Color.purple())
+    desc_template = settings.get(
+        "welcome_message",
+        "• Welcome To **{server}**\n⚠️ Enjoy Ur Stay Here\n➤ {user}\n➤ {username}\n➤ Acc Created : {joindate}",
+    )
+    ping_template = settings.get("welcome_ping", "{user} Welcome")
+    banner_url = settings.get("welcome_banner")
+
+    embed = discord.Embed(
+        title=fill_placeholders(title_template, member),
+        description=fill_placeholders(desc_template, member),
+        color=discord.Color.purple(),
+    )
     embed.set_thumbnail(url=member.display_avatar.url)
-    if banner_url := settings.get("welcome_banner"):
+    if banner_url:
         embed.set_image(url=banner_url)
     embed.set_footer(text=f"{ordinal(member.guild.member_count)} member!")
     embed.timestamp = discord.utils.utcnow()
-    await channel.send(content=fill_placeholders(settings.get("welcome_ping", "{user} Welcome"), member), embed=embed)
+
+    content = fill_placeholders(ping_template, member)
+    await channel.send(content=content, embed=embed)
 
 
 @bot.event
-async def on_member_remove(member: discord.Member) -> None:
+async def on_member_remove(member: discord.Member):
     settings = get_guild_settings(member.guild.id)
     channel_id = settings.get("goodbye_channel")
-    if not channel_id or (channel := member.guild.get_channel(channel_id)) is None:
+    if not channel_id:
         return
-    template = settings.get("goodbye_message", "〻 GOODBYE {username}\n» You have left {server}\n» Thanks for being part of WXRST\n» {membercount} members remain")
-    embed = discord.Embed(description=fill_placeholders(template, member), color=discord.Color.red())
+
+    channel = member.guild.get_channel(channel_id)
+    if channel is None:
+        return
+
+    message_template = settings.get(
+        "goodbye_message",
+        "〻 GOODBYE {username}\n» You have left {server}\n» Thanks for being part of WXRST\n» {membercount} members remain",
+    )
+    text = fill_placeholders(message_template, member)
+
+    embed = discord.Embed(description=text, color=discord.Color.red())
     embed.set_thumbnail(url=member.display_avatar.url)
     await channel.send(embed=embed)
 
 
-# ---------------------------------------------------------------------------
-# Existing moderation features
-# ---------------------------------------------------------------------------
-
 @bot.tree.command(name="kick", description="Kick a member from the server")
 @app_commands.describe(member="Who to kick", reason="Why are you kicking them?")
-async def kick(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason given") -> None:
+async def kick(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason given"):
     if not interaction.user.guild_permissions.kick_members:
         await interaction.response.send_message("You don't have permission to kick members.", ephemeral=True)
         return
     if member.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner_id:
         await interaction.response.send_message("You can't kick someone with an equal or higher role than you.", ephemeral=True)
         return
+
     try:
         await member.kick(reason=f"{reason} (by {interaction.user})")
         await interaction.response.send_message(f"👢 Kicked **{member}**. Reason: {reason}")
@@ -666,13 +561,14 @@ async def kick(interaction: discord.Interaction, member: discord.Member, reason:
 
 @bot.tree.command(name="ban", description="Ban a member from the server")
 @app_commands.describe(member="Who to ban", reason="Why are you banning them?")
-async def ban(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason given") -> None:
+async def ban(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason given"):
     if not interaction.user.guild_permissions.ban_members:
         await interaction.response.send_message("You don't have permission to ban members.", ephemeral=True)
         return
     if member.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner_id:
         await interaction.response.send_message("You can't ban someone with an equal or higher role than you.", ephemeral=True)
         return
+
     try:
         await member.ban(reason=f"{reason} (by {interaction.user})")
         await interaction.response.send_message(f"🔨 Banned **{member}**. Reason: {reason}")
@@ -682,10 +578,11 @@ async def ban(interaction: discord.Interaction, member: discord.Member, reason: 
 
 @bot.tree.command(name="timeout", description="Temporarily mute a member (they can't send messages)")
 @app_commands.describe(member="Who to timeout", minutes="How many minutes", reason="Why are you timing them out?")
-async def timeout(interaction: discord.Interaction, member: discord.Member, minutes: int, reason: str = "No reason given") -> None:
+async def timeout(interaction: discord.Interaction, member: discord.Member, minutes: int, reason: str = "No reason given"):
     if not interaction.user.guild_permissions.moderate_members:
         await interaction.response.send_message("You don't have permission to timeout members.", ephemeral=True)
         return
+
     duration = discord.utils.utcnow() + datetime.timedelta(minutes=minutes)
     try:
         await member.edit(timed_out_until=duration, reason=f"{reason} (by {interaction.user})")
@@ -696,293 +593,114 @@ async def timeout(interaction: discord.Interaction, member: discord.Member, minu
 
 @bot.tree.command(name="warn", description="Give a member a warning (saved in their record)")
 @app_commands.describe(member="Who to warn", reason="Why are you warning them?")
-async def warn(interaction: discord.Interaction, member: discord.Member, reason: str) -> None:
+async def warn(interaction: discord.Interaction, member: discord.Member, reason: str):
     if not interaction.user.guild_permissions.moderate_members:
         await interaction.response.send_message("You don't have permission to warn members.", ephemeral=True)
         return
+
     config = load_config()
     guild_key = str(interaction.guild.id)
-    config.setdefault(guild_key, {}).setdefault("warnings", {}).setdefault(str(member.id), []).append(reason)
+    config.setdefault(guild_key, {})
+    config[guild_key].setdefault("warnings", {})
+    config[guild_key]["warnings"].setdefault(str(member.id), [])
+    config[guild_key]["warnings"][str(member.id)].append(reason)
     save_config(config)
+
     count = len(config[guild_key]["warnings"][str(member.id)])
     await interaction.response.send_message(f"⚠️ Warned **{member}** (warning #{count}). Reason: {reason}")
 
 
 @bot.tree.command(name="warnings", description="See a member's past warnings")
 @app_commands.describe(member="Whose warnings to check")
-async def warnings(interaction: discord.Interaction, member: discord.Member) -> None:
-    member_warnings = get_guild_settings(interaction.guild.id).get("warnings", {}).get(str(member.id), [])
+async def warnings(interaction: discord.Interaction, member: discord.Member):
+    settings = get_guild_settings(interaction.guild.id)
+    member_warnings = settings.get("warnings", {}).get(str(member.id), [])
+
     if not member_warnings:
         await interaction.response.send_message(f"**{member}** has no warnings.", ephemeral=True)
         return
-    text = "\n".join(f"{index + 1}. {reason}" for index, reason in enumerate(member_warnings))
+
+    text = "\n".join(f"{i+1}. {reason}" for i, reason in enumerate(member_warnings))
     await interaction.response.send_message(f"⚠️ Warnings for **{member}**:\n{text}", ephemeral=True)
 
 
 @bot.tree.command(name="clear", description="Delete a number of recent messages in this channel")
 @app_commands.describe(amount="How many messages to delete (max 100)")
-async def clear(interaction: discord.Interaction, amount: app_commands.Range[int, 1, 100]) -> None:
+async def clear(interaction: discord.Interaction, amount: app_commands.Range[int, 1, 100]):
     if not interaction.user.guild_permissions.manage_messages:
         await interaction.response.send_message("You don't have permission to delete messages.", ephemeral=True)
         return
+
     await interaction.response.defer(ephemeral=True)
     deleted = await interaction.channel.purge(limit=amount)
     await interaction.followup.send(f"🧹 Deleted {len(deleted)} message(s).", ephemeral=True)
 
 
-# ---------------------------------------------------------------------------
-# Music slash commands
-# ---------------------------------------------------------------------------
-
-@bot.tree.command(name="join", description="Join your current voice channel")
-async def join(interaction: discord.Interaction) -> None:
-    existing = interaction.guild.voice_client
-    if existing and existing.is_connected():
-        await interaction.response.send_message(f"I'm already in {existing.channel.mention}.", ephemeral=True)
+@bot.tree.command(name="join", description="Make the bot join your current voice channel")
+async def join(interaction: discord.Interaction):
+    voice_state = interaction.user.voice
+    if voice_state is None or voice_state.channel is None:
+        await interaction.response.send_message("You need to be in a voice channel first.", ephemeral=True)
         return
-    voice_client, error = await connect_to_user_voice(interaction)
-    if error:
-        await interaction.response.send_message(error, ephemeral=True)
+
+    voice_channel = voice_state.channel
+    vc = discord.utils.get(bot.voice_clients, guild=interaction.guild)
+
+    try:
+        if vc is None:
+            await voice_channel.connect()
+        elif vc.channel != voice_channel:
+            await vc.move_to(voice_channel)
+        else:
+            await interaction.response.send_message(f"I'm already in {voice_channel.mention}.", ephemeral=True)
+            return
+    except discord.ClientException:
+        await interaction.response.send_message("Something went wrong trying to join.", ephemeral=True)
         return
-    await interaction.response.send_message(f"✅ Joined {voice_client.channel.mention}.", ephemeral=True)
+
+    await interaction.response.send_message(f"✅ Joined {voice_channel.mention}.", ephemeral=True)
 
 
-async def leave_voice_channel(interaction: discord.Interaction) -> None:
-    voice_client = interaction.guild.voice_client
-    if voice_client is None or not voice_client.is_connected():
+async def leave_voice_channel(interaction: discord.Interaction):
+    vc = discord.utils.get(bot.voice_clients, guild=interaction.guild)
+    if vc is None:
         await interaction.response.send_message("I'm not in a voice channel.", ephemeral=True)
         return
-    player = music_players.pop(interaction.guild.id, None)
-    if player:
-        async with player.lock:
-            player.queue.clear()
-            player.current = None
-            player.starting = False
-            player.advance_after_stop = False
-    try:
-        if voice_client.is_playing() or voice_client.is_paused():
-            voice_client.stop()
-        await voice_client.disconnect(force=True)
-        await interaction.response.send_message("👋 Left the voice channel and cleared the music queue.", ephemeral=True)
-    except (discord.ClientException, discord.HTTPException, OSError) as error:
-        logger.warning("Voice disconnect failed in guild %s: %s", interaction.guild.id, error)
-        await interaction.response.send_message("I couldn't disconnect cleanly, but the music queue was reset.", ephemeral=True)
+
+    tts_queues[interaction.guild.id] = []
+    await vc.disconnect()
+    await interaction.response.send_message("👋 Left the voice channel.", ephemeral=True)
 
 
-@bot.tree.command(name="leave", description="Leave voice, stop music, and clear the queue")
-async def leave(interaction: discord.Interaction) -> None:
+@bot.tree.command(name="leave", description="Make the bot leave the voice channel (stops TTS)")
+async def leave(interaction: discord.Interaction):
     await leave_voice_channel(interaction)
 
 
-# These aliases were present in the existing bot and are kept for compatibility.
-@bot.tree.command(name="disconnect", description="Leave voice, stop music, and clear the queue")
-async def disconnect(interaction: discord.Interaction) -> None:
+@bot.tree.command(name="disconnect", description="Make the bot leave the voice channel (stops TTS)")
+async def disconnect(interaction: discord.Interaction):
     await leave_voice_channel(interaction)
 
 
-@bot.tree.command(name="leavevc", description="Leave voice, stop music, and clear the queue")
-async def leavevc(interaction: discord.Interaction) -> None:
+@bot.tree.command(name="leavevc", description="Make the bot leave the voice channel (stops TTS)")
+async def leavevc(interaction: discord.Interaction):
     await leave_voice_channel(interaction)
 
 
-@bot.tree.command(name="play", description="Play a YouTube URL or search YouTube")
-@app_commands.describe(query="A YouTube URL or search text")
-async def play(interaction: discord.Interaction, query: str) -> None:
-    if not FFMPEG_EXECUTABLE:
-        await interaction.response.send_message(require_ffmpeg_message(), ephemeral=True)
-        return
-    voice_client, error = await connect_to_user_voice(interaction)
-    if error:
-        await interaction.response.send_message(error, ephemeral=True)
+@bot.tree.command(name="skip", description="Skip the message currently being spoken")
+async def skip(interaction: discord.Interaction):
+    vc = discord.utils.get(bot.voice_clients, guild=interaction.guild)
+    if vc is None or not vc.is_playing():
+        await interaction.response.send_message("Nothing is being spoken right now.", ephemeral=True)
         return
 
-    await interaction.response.defer(thinking=True)
-    try:
-        track = await asyncio.to_thread(extract_track, query, interaction.user)
-    except Exception as extraction_error:
-        logger.warning("yt-dlp extraction failed for %r: %s", query, extraction_error, exc_info=True)
-        await interaction.followup.send(
-            "⚠️ I couldn't get audio for that YouTube result. It may be unavailable, private, age-restricted, or YouTube may be blocking requests. Try another link or search.",
-            ephemeral=True,
-        )
-        return
-
-    player = get_player(interaction.guild.id)
-    player.announcement_channel = interaction.channel
-    async with player.lock:
-        busy = player.current is not None or player.starting or voice_client.is_playing() or voice_client.is_paused()
-        if busy:
-            player.queue.append(track)
-            position = len(player.queue)
-        else:
-            player.current = track
-            player.starting = True
-            position = 0
-
-    if position:
-        await interaction.followup.send(f"➕ Added **{track['title']}** to the queue at position **{position}** — requested by **{track['requester_name']}**.")
-        return
-
-    await interaction.followup.send(f"▶️ Preparing **{track['title']}** — requested by **{track['requester_name']}**.")
-    await begin_current_track(interaction.guild.id, voice_client, track)
-
-
-@bot.tree.command(name="pause", description="Pause the current music")
-async def pause(interaction: discord.Interaction) -> None:
-    voice_client = interaction.guild.voice_client
-    if voice_client is None or not voice_client.is_playing():
-        await interaction.response.send_message("Nothing is playing right now.", ephemeral=True)
-        return
-    voice_client.pause()
-    await interaction.response.send_message("⏸️ Paused.")
-
-
-@bot.tree.command(name="resume", description="Resume paused music")
-async def resume(interaction: discord.Interaction) -> None:
-    voice_client = interaction.guild.voice_client
-    if voice_client is None or not voice_client.is_paused():
-        await interaction.response.send_message("Nothing is paused right now.", ephemeral=True)
-        return
-    voice_client.resume()
-    await interaction.response.send_message("▶️ Resumed.")
-
-
-@bot.tree.command(name="skip", description="Skip the current song")
-async def skip(interaction: discord.Interaction) -> None:
-    voice_client = interaction.guild.voice_client
-    player = music_players.get(interaction.guild.id)
-    if voice_client is None or player is None or not voice_client.is_playing():
-        await interaction.response.send_message("Nothing is playing right now.", ephemeral=True)
-        return
-    async with player.lock:
-        player.current = None
-        player.starting = False
-        player.advance_after_stop = True
-    voice_client.stop()
-    await interaction.response.send_message("⏭️ Skipped.")
-
-
-@bot.tree.command(name="stop", description="Stop music and clear the queue")
-async def stop(interaction: discord.Interaction) -> None:
-    player = music_players.get(interaction.guild.id)
-    voice_client = interaction.guild.voice_client
-    if player is None or (player.current is None and not player.queue):
-        await interaction.response.send_message("There is no music to stop.", ephemeral=True)
-        return
-    async with player.lock:
-        player.queue.clear()
-        player.current = None
-        player.starting = False
-        player.advance_after_stop = False
-    if voice_client and (voice_client.is_playing() or voice_client.is_paused()):
-        voice_client.stop()
-    await interaction.response.send_message("⏹️ Stopped and cleared the queue.")
-
-
-@bot.tree.command(name="queue", description="Show the current music queue")
-async def queue(interaction: discord.Interaction) -> None:
-    player = music_players.get(interaction.guild.id)
-    embed = discord.Embed(title="Music Queue", color=discord.Color.blurple())
-    if player is None:
-        embed.description = "The queue is empty. Use `/play` to add a song."
-    else:
-        async with player.lock:
-            current = player.current
-            waiting = list(player.queue)
-        if current:
-            embed.add_field(name="Currently Playing", value=f"[{current['title']}]({current['webpage_url']})\nRequested by {current['requester_name']}", inline=False)
-        else:
-            embed.add_field(name="Currently Playing", value="Nothing", inline=False)
-        if waiting:
-            lines = [f"{index}. **{track['title']}** — {track['requester_name']}" for index, track in enumerate(waiting, 1)]
-            embed.add_field(name="Up Next", value="\n".join(lines[:15]), inline=False)
-            if len(lines) > 15:
-                embed.set_footer(text=f"Showing 15 of {len(lines)} waiting songs")
-        else:
-            embed.add_field(name="Up Next", value="No songs waiting.", inline=False)
-    await interaction.response.send_message(embed=embed)
-
-
-@bot.tree.command(name="nowplaying", description="Show the current song")
-async def nowplaying(interaction: discord.Interaction) -> None:
-    player = music_players.get(interaction.guild.id)
-    current = player.current if player else None
-    if current is None:
-        await interaction.response.send_message("Nothing is playing right now.", ephemeral=True)
-        return
-    embed = discord.Embed(title="Now Playing", description=f"[{current['title']}]({current['webpage_url']})", color=discord.Color.green())
-    embed.add_field(name="Requested by", value=current["requester_name"])
-    embed.add_field(name="Duration", value=format_duration(current["duration"]))
-    await interaction.response.send_message(embed=embed)
-
-
-@bot.tree.command(name="volume", description="Set music volume from 0 to 100")
-@app_commands.describe(percent="Volume from 0 to 100")
-async def volume(interaction: discord.Interaction, percent: int) -> None:
-    if not 0 <= percent <= 100:
-        await interaction.response.send_message("Volume must be between 0 and 100.", ephemeral=True)
-        return
-    player = get_player(interaction.guild.id)
-    async with player.lock:
-        player.volume = percent / 100
-    voice_client = interaction.guild.voice_client
-    if voice_client and isinstance(voice_client.source, discord.PCMVolumeTransformer):
-        voice_client.source.volume = player.volume
-    await interaction.response.send_message(f"🔊 Volume set to **{percent}%**.")
-
-
-@bot.tree.command(name="shuffle", description="Shuffle the waiting music queue")
-async def shuffle(interaction: discord.Interaction) -> None:
-    player = music_players.get(interaction.guild.id)
-    if player is None:
-        await interaction.response.send_message("There are no waiting songs to shuffle.", ephemeral=True)
-        return
-    async with player.lock:
-        if len(player.queue) < 2:
-            await interaction.response.send_message("I need at least two waiting songs to shuffle.", ephemeral=True)
-            return
-        random.shuffle(player.queue)
-    await interaction.response.send_message("🔀 Shuffled the waiting queue.")
-
-
-@bot.tree.command(name="remove", description="Remove a waiting song by its queue position")
-@app_commands.describe(position="The waiting-song position shown by /queue")
-async def remove(interaction: discord.Interaction, position: int) -> None:
-    player = music_players.get(interaction.guild.id)
-    if player is None:
-        await interaction.response.send_message("The queue is empty.", ephemeral=True)
-        return
-    async with player.lock:
-        if position < 1 or position > len(player.queue):
-            await interaction.response.send_message("That queue position does not exist.", ephemeral=True)
-            return
-        removed = player.queue.pop(position - 1)
-    await interaction.response.send_message(f"🗑️ Removed **{removed['title']}** from the queue.")
-
-
-@bot.tree.command(name="loop", description="Toggle looping the current song")
-async def loop(interaction: discord.Interaction) -> None:
-    player = music_players.get(interaction.guild.id)
-    if player is None or player.current is None:
-        await interaction.response.send_message("Nothing is playing to loop.", ephemeral=True)
-        return
-    async with player.lock:
-        player.loop_current = not player.loop_current
-        enabled = player.loop_current
-    await interaction.response.send_message("🔁 Current-song looping is now **on**." if enabled else "➡️ Current-song looping is now **off**.")
-
-
-@bot.tree.command(name="musichelp", description="Show music command help")
-async def musichelp(interaction: discord.Interaction) -> None:
-    embed = discord.Embed(title="Music Commands", description="Use `/play` with a YouTube URL or search text.", color=discord.Color.blurple())
-    embed.add_field(name="Playback", value="`/join` `/leave` `/play` `/pause` `/resume` `/skip` `/stop`", inline=False)
-    embed.add_field(name="Queue", value="`/queue` `/nowplaying` `/shuffle` `/remove` `/loop`", inline=False)
-    embed.add_field(name="Sound", value="`/volume` `/musichelp`", inline=False)
-    embed.set_footer(text="/remove uses the position under Up Next; the current song is never removed by it.")
-    await interaction.response.send_message(embed=embed)
+    vc.stop()
+    await interaction.response.send_message("⏭️ Skipped.", ephemeral=True)
 
 
 if __name__ == "__main__":
     if not TOKEN:
-        raise SystemExit("No token found! Open .env and set DISCORD_TOKEN.")
+        raise SystemExit(
+            "No token found! Open the .env file and paste your bot token into DISCORD_TOKEN."
+        )
     bot.run(TOKEN)

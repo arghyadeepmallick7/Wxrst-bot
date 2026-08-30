@@ -244,4 +244,4 @@ async def setwelcome(interaction: discord.Interaction, channel_id: str):
         await interaction.response.send_message("Only a server admin can set this up.", ephemeral=True)
         return
 
-    channel =
+     channel = resolve_channel(interaction.guild, channel_id)

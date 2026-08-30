@@ -12,15 +12,18 @@ You only touch the .env file to set your secret token and role name.
 
 import os
 import datetime
+import asyncio
 import discord
 from discord.ext import commands
 from discord import app_commands
 from dotenv import load_dotenv
+from gtts import gTTS
 
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 ROLE_ID = int(os.getenv("ROLE_ID", "0"))
+GUILD_ID = int(os.getenv("GUILD_ID", "0"))
 
 intents = discord.Intents.default()
 intents.members = True
@@ -86,6 +89,23 @@ async def on_ready():
         print(f"✅ Synced {len(synced)} slash command(s)")
     except Exception as e:
         print(f"⚠️ Could not sync commands: {e}")
+
+
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    if GUILD_ID and guild.id != GUILD_ID:
+        print(f"🚪 Leaving unauthorized server: {guild.name} ({guild.id})")
+        await guild.leave()
+
+
+@bot.tree.interaction_check
+async def block_other_servers(interaction: discord.Interaction) -> bool:
+    if GUILD_ID and interaction.guild and interaction.guild.id != GUILD_ID:
+        await interaction.response.send_message(
+            "This bot is private and only works in its home server.", ephemeral=True
+        )
+        return False
+    return True
 
 
 @bot.tree.command(name="notify", description="DM everyone who has the special role")
@@ -205,7 +225,6 @@ class GoodbyeModal(discord.ui.Modal, title="Goodbye Message Setup"):
 
 
 def resolve_channel(guild: discord.Guild, channel_input: str):
-    """Turn '#channel-name', a raw channel ID, or a channel mention into a real channel."""
     cleaned = channel_input.strip().strip("<#>")
     if cleaned.isdigit():
         return guild.get_channel(int(cleaned))
@@ -347,11 +366,73 @@ async def removebadword(interaction: discord.Interaction, word: str):
 
 
 recent_messages = {}
+tts_queues = {}
+
+
+async def play_next_tts(guild_id: int, vc: discord.VoiceClient):
+    queue = tts_queues.get(guild_id, [])
+    if not queue:
+        await asyncio.sleep(2)
+        if not tts_queues.get(guild_id):
+            try:
+                await vc.disconnect()
+            except Exception:
+                pass
+        return
+
+    text = queue.pop(0)
+    filename = f"tts_{guild_id}.mp3"
+
+    def generate_audio():
+        gTTS(text=text, lang="en").save(filename)
+
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, generate_audio)
+
+    def after_playing(error):
+        if error:
+            print(f"⚠️ TTS playback error: {error}")
+        fut = asyncio.run_coroutine_threadsafe(play_next_tts(guild_id, vc), bot.loop)
+        try:
+            fut.result()
+        except Exception as e:
+            print(f"⚠️ TTS follow-up error: {e}")
+
+    vc.play(discord.FFmpegPCMAudio(filename), after=after_playing)
+
+
+async def handle_tts_message(message: discord.Message, spoken_text: str):
+    voice_state = message.author.voice
+    if voice_state is None or voice_state.channel is None:
+        return
+
+    voice_channel = voice_state.channel
+    vc = discord.utils.get(bot.voice_clients, guild=message.guild)
+
+    try:
+        if vc is None:
+            vc = await voice_channel.connect()
+        elif vc.channel != voice_channel:
+            await vc.move_to(voice_channel)
+    except discord.ClientException:
+        return
+
+    full_text = f"{message.author.display_name} said {spoken_text}"
+    tts_queues.setdefault(message.guild.id, []).append(full_text)
+
+    if not vc.is_playing():
+        await play_next_tts(message.guild.id, vc)
 
 
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot or message.guild is None:
+        return
+
+    if message.content.startswith("."):
+        spoken_text = message.content[1:].strip()
+        if spoken_text:
+            await handle_tts_message(message, spoken_text)
         return
 
     settings = get_guild_settings(message.guild.id)
@@ -557,6 +638,18 @@ async def clear(interaction: discord.Interaction, amount: app_commands.Range[int
     await interaction.response.defer(ephemeral=True)
     deleted = await interaction.channel.purge(limit=amount)
     await interaction.followup.send(f"🧹 Deleted {len(deleted)} message(s).", ephemeral=True)
+
+
+@bot.tree.command(name="leavevc", description="Make the bot leave the voice channel (stops TTS)")
+async def leavevc(interaction: discord.Interaction):
+    vc = discord.utils.get(bot.voice_clients, guild=interaction.guild)
+    if vc is None:
+        await interaction.response.send_message("I'm not in a voice channel.", ephemeral=True)
+        return
+
+    tts_queues[interaction.guild.id] = []
+    await vc.disconnect()
+    await interaction.response.send_message("👋 Left the voice channel.", ephemeral=True)
 
 
 if __name__ == "__main__":

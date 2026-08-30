@@ -18,6 +18,7 @@ from discord.ext import commands
 from discord import app_commands
 from dotenv import load_dotenv
 from gtts import gTTS
+import yt_dlp
 
 load_dotenv()
 
@@ -362,16 +363,58 @@ async def removebadword(interaction: discord.Interaction, word: str):
         set_guild_setting(interaction.guild.id, "bad_words", bad_words)
         await interaction.response.send_message(f"✅ Removed `{word}` from the blocked word list.", ephemeral=True)
     else:
-        await interaction.response.send_message(f"That word wasn't on the list.", ephemeral=True)
+        await interaction.response.send_message("That word wasn't on the list.", ephemeral=True)
 
 
 recent_messages = {}
 tts_queues = {}
+music_queues = {}
+now_playing = {}
+
+YTDL_OPTIONS = {
+    "format": "bestaudio/best",
+    "noplaylist": True,
+    "quiet": True,
+    "default_search": "ytsearch1",
+    "nocheckcertificate": True,
+}
+FFMPEG_OPTIONS = {
+    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
+    "options": "-vn",
+}
+
+
+def search_song(query: str):
+    with yt_dlp.YoutubeDL(YTDL_OPTIONS) as ydl:
+        info = ydl.extract_info(query, download=False)
+        if "entries" in info:
+            info = info["entries"][0]
+        return {"title": info.get("title", "Unknown title"), "url": info["url"]}
+
+
+async def play_next_song(guild_id: int, vc: discord.VoiceClient):
+    queue = music_queues.get(guild_id, [])
+    if not queue:
+        now_playing[guild_id] = None
+        return
+
+    song = queue.pop(0)
+    now_playing[guild_id] = song
+
+    def after_playing(error):
+        if error:
+            print(f"⚠️ Music playback error: {error}")
+        fut = asyncio.run_coroutine_threadsafe(play_next_song(guild_id, vc), bot.loop)
+        try:
+            fut.result()
+        except Exception as e:
+            print(f"⚠️ Music follow-up error: {e}")
+
+    source = discord.FFmpegPCMAudio(song["url"], **FFMPEG_OPTIONS)
+    vc.play(discord.PCMVolumeTransformer(source, volume=0.5), after=after_playing)
 
 
 async def play_next_tts(guild_id: int, vc: discord.VoiceClient):
-    """Play the next queued TTS message. Stays connected when the queue empties —
-    only /leave, /disconnect, or /leavevc actually disconnects the bot."""
     queue = tts_queues.get(guild_id, [])
     if not queue:
         return
@@ -400,6 +443,13 @@ async def play_next_tts(guild_id: int, vc: discord.VoiceClient):
 async def handle_tts_message(message: discord.Message, spoken_text: str):
     voice_state = message.author.voice
     if voice_state is None or voice_state.channel is None:
+        return
+
+    if now_playing.get(message.guild.id):
+        await message.channel.send(
+            f"❌ Failed to speak — {message.author.mention} has wished to play music, "
+            f"so text-to-speech is paused until the music stops."
+        )
         return
 
     voice_channel = voice_state.channel
@@ -696,6 +746,116 @@ async def skip(interaction: discord.Interaction):
 
     vc.stop()
     await interaction.response.send_message("⏭️ Skipped.", ephemeral=True)
+
+
+@bot.tree.command(name="play", description="Play a song in your voice channel (searches YouTube)")
+@app_commands.describe(query="Song name or YouTube link")
+async def play(interaction: discord.Interaction, query: str):
+    voice_state = interaction.user.voice
+    if voice_state is None or voice_state.channel is None:
+        await interaction.response.send_message("You need to be in a voice channel first.", ephemeral=True)
+        return
+
+    await interaction.response.defer()
+
+    vc = discord.utils.get(bot.voice_clients, guild=interaction.guild)
+    if vc is None:
+        vc = await voice_state.channel.connect()
+    elif vc.channel != voice_state.channel:
+        await vc.move_to(voice_state.channel)
+
+    try:
+        loop = asyncio.get_event_loop()
+        song = await loop.run_in_executor(None, search_song, query)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Couldn't find that song: {e}")
+        return
+
+    song["requester"] = interaction.user.display_name
+    music_queues.setdefault(interaction.guild.id, []).append(song)
+
+    if vc.is_playing() or vc.is_paused():
+        await interaction.followup.send(f"➕ Queued: **{song['title']}**")
+    else:
+        await play_next_song(interaction.guild.id, vc)
+        await interaction.followup.send(f"▶️ Now playing: **{song['title']}**")
+
+
+@bot.tree.command(name="pause", description="Pause the current song")
+async def pause(interaction: discord.Interaction):
+    vc = discord.utils.get(bot.voice_clients, guild=interaction.guild)
+    if vc is None or not vc.is_playing():
+        await interaction.response.send_message("Nothing is playing right now.", ephemeral=True)
+        return
+    vc.pause()
+    await interaction.response.send_message("⏸️ Paused.")
+
+
+@bot.tree.command(name="resume", description="Resume the paused song")
+async def resume(interaction: discord.Interaction):
+    vc = discord.utils.get(bot.voice_clients, guild=interaction.guild)
+    if vc is None or not vc.is_paused():
+        await interaction.response.send_message("Nothing is paused right now.", ephemeral=True)
+        return
+    vc.resume()
+    await interaction.response.send_message("▶️ Resumed.")
+
+
+@bot.tree.command(name="stopmusic", description="Stop the music and clear the queue")
+async def stopmusic(interaction: discord.Interaction):
+    vc = discord.utils.get(bot.voice_clients, guild=interaction.guild)
+    music_queues[interaction.guild.id] = []
+    now_playing[interaction.guild.id] = None
+    if vc and (vc.is_playing() or vc.is_paused()):
+        vc.stop()
+    await interaction.response.send_message("⏹️ Music stopped and queue cleared.")
+
+
+@bot.tree.command(name="musicqueue", description="See what's up next in the music queue")
+async def musicqueue(interaction: discord.Interaction):
+    queue = music_queues.get(interaction.guild.id, [])
+    current = now_playing.get(interaction.guild.id)
+
+    lines = []
+    if current:
+        lines.append(f"🎶 Now playing: **{current['title']}** (requested by {current['requester']})")
+    if queue:
+        lines.append("\n**Up next:**")
+        for i, song in enumerate(queue, start=1):
+            lines.append(f"{i}. {song['title']} (requested by {song['requester']})")
+
+    if not lines:
+        await interaction.response.send_message("The queue is empty.", ephemeral=True)
+        return
+
+    await interaction.response.send_message("\n".join(lines))
+
+
+@bot.tree.command(name="nowplaying", description="See the current song")
+async def nowplaying(interaction: discord.Interaction):
+    current = now_playing.get(interaction.guild.id)
+    if not current:
+        await interaction.response.send_message("Nothing is playing right now.", ephemeral=True)
+        return
+    await interaction.response.send_message(f"🎶 Now playing: **{current['title']}** (requested by {current['requester']})")
+
+
+@bot.tree.command(name="volume", description="Change the music volume")
+@app_commands.describe(level="Volume from 0 to 100")
+async def volume(interaction: discord.Interaction, level: app_commands.Range[int, 0, 100]):
+    vc = discord.utils.get(bot.voice_clients, guild=interaction.guild)
+    if vc is None or vc.source is None:
+        await interaction.response.send_message("Nothing is playing right now.", ephemeral=True)
+        return
+
+    if not hasattr(vc.source, "volume"):
+        await interaction.response.send_message(
+            "Volume control only works for music, not text-to-speech.", ephemeral=True
+        )
+        return
+
+    vc.source.volume = level / 100
+    await interaction.response.send_message(f"🔊 Volume set to {level}%.")
 
 
 if __name__ == "__main__":

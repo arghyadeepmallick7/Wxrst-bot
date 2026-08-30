@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import random
+import re
 import shutil
 import time
 from pathlib import Path
@@ -1013,9 +1014,11 @@ DEPARTURE_DEFAULTS = {
     ),
     "banned_message": (
         "⤫ **WXRST**\n\n"
-        "〻 You have been **banned** from `{SERVER_NAME}`.\n\n"
-        "[BAN MESSAGE WILL BE DECIDED LATER]\n\n"
-        "» Server link:\n`{SERVER_INVITE}`"
+        "〻 Hey **{DISPLAY_NAME}**, you have been **banned** from **{SERVER_NAME}**.\n\n"
+        "» If you believe this action was made in error, you may contact the server administration.\n\n"
+        "𑣲 **Server Link**\n"
+        "» `{SERVER_INVITE}`\n\n"
+        "~~You are currently unable to access the server.~~"
     ),
 }
 recent_departure_bans: dict[tuple[int, int], float] = {}
@@ -1044,7 +1047,30 @@ def departure_template(member: discord.abc.User, guild: discord.Guild, settings:
     }
     for placeholder, value in replacements.items():
         template = template.replace(placeholder, value)
-    return template
+    return format_departure_message(template)
+
+
+def format_departure_message(template: str) -> str:
+    """Keep configured wording but add readable paragraph gaps around WXRST sections."""
+    formatted = template.replace("\r\n", "\n").strip()
+
+    # Add a blank line before each section marker
+    for marker in ("〻", "»", "𑣲", "⤫", "⚡︎"):
+        formatted = re.sub(rf"(?<!\n)\s*{re.escape(marker)}", f"\n\n{marker}", formatted)
+
+    # Keep a "𑣲 Label" line glued to the "» Value" line right after it,
+    # instead of letting them get pushed into separate paragraphs
+    formatted = re.sub(r"(𑣲[^\n]*)\n\n(»)", r"\1\n\2", formatted)
+
+    # Strikethrough spans (~~like this~~) should never get split in half —
+    # only add a break before the whole span, never before its closing ~~
+    formatted = re.sub(r"(?<!\n)\s*(~~[^~\n]+~~)", r"\n\n\1", formatted)
+
+    # Clean up: never allow more than one blank line in a row, and never
+    # start or end the message with blank lines
+    formatted = re.sub(r"\n{3,}", "\n\n", formatted).strip()
+
+    return formatted
 
 
 def departure_dm_allowed(settings: dict[str, Any], departure_type: str) -> bool:
@@ -1165,20 +1191,47 @@ DEPARTURE_MESSAGE_CHOICES = [
     app_commands.Choice(name="Kicked", value="kick"),
     app_commands.Choice(name="Banned", value="ban"),
 ]
+DEPARTURE_SETTING_KEYS = {
+    "leave": "voluntary_leave_message",
+    "kick": "kicked_message",
+    "ban": "banned_message",
+}
+
+
+class DepartureMessageModal(discord.ui.Modal, title="Departure Message"):
+    """A popup form with a real multi-line box, so line breaks actually work."""
+
+    message = discord.ui.TextInput(
+        label="Message (press Enter for new lines)",
+        style=discord.TextStyle.paragraph,
+        placeholder="Supports {USER} {USERNAME} {DISPLAY_NAME} {SERVER_NAME} {SERVER_ID} {SERVER_INVITE}",
+        max_length=2000,
+    )
+
+    def __init__(self, settings_key: str, label: str, current_value: str):
+        super().__init__()
+        self.settings_key = settings_key
+        self.label = label
+        self.message.default = current_value
+
+    async def on_submit(self, interaction: discord.Interaction):
+        settings = departure_settings(interaction.guild.id)
+        settings[self.settings_key] = self.message.value[:2000]
+        save_departure_settings(interaction.guild.id, settings)
+        await interaction.response.send_message(f"✅ {self.label} departure message saved.", ephemeral=True)
 
 
 @departure_group.command(name="setmessage", description="Set a departure DM message template")
 @app_commands.choices(message_type=DEPARTURE_MESSAGE_CHOICES)
-@app_commands.describe(message_type="Departure situation", message="Supports {USER}, {USERNAME}, {DISPLAY_NAME}, {SERVER_NAME}, {SERVER_ID}, {SERVER_INVITE}")
-async def departure_setmessage(interaction: discord.Interaction, message_type: app_commands.Choice[str], message: str) -> None:
+@app_commands.describe(message_type="Departure situation")
+async def departure_setmessage(interaction: discord.Interaction, message_type: app_commands.Choice[str]) -> None:
     if not require_departure_admin(interaction):
         await interaction.response.send_message("Only administrators can configure departure DMs.", ephemeral=True)
         return
-    keys = {"leave": "voluntary_leave_message", "kick": "kicked_message", "ban": "banned_message"}
+    settings_key = DEPARTURE_SETTING_KEYS[message_type.value]
     settings = departure_settings(interaction.guild.id)
-    settings[keys[message_type.value]] = message[:2000]
-    save_departure_settings(interaction.guild.id, settings)
-    await interaction.response.send_message(f"✅ {message_type.name} departure message saved.", ephemeral=True)
+    current_value = settings.get(settings_key, DEPARTURE_DEFAULTS[settings_key])
+    await interaction.response.send_modal(DepartureMessageModal(settings_key, message_type.name, current_value))
 
 
 @departure_group.command(name="settings", description="Choose which departure types send DMs")

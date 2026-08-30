@@ -638,6 +638,8 @@ async def on_member_join(member: discord.Member) -> None:
 
 @bot.event
 async def on_member_remove(member: discord.Member) -> None:
+    # Departure DMs run independently so the existing goodbye system remains fast.
+    asyncio.create_task(handle_member_departure(member))
     settings = get_guild_settings(member.guild.id)
     channel_id = settings.get("goodbye_channel")
     if not channel_id or (channel := member.guild.get_channel(channel_id)) is None:
@@ -984,6 +986,228 @@ async def musichelp(interaction: discord.Interaction) -> None:
     embed.add_field(name="Sound", value="`/volume` `/musichelp`", inline=False)
     embed.set_footer(text="/remove uses the position under Up Next; the current song is never removed by it.")
     await interaction.response.send_message(embed=embed)
+
+
+# ---------------------------------------------------------------------------
+# Configurable member departure DMs
+# ---------------------------------------------------------------------------
+
+DEPARTURE_DEFAULTS = {
+    "enabled": False,
+    "server_invite": "",
+    "send_leave": True,
+    "send_kick": True,
+    "send_ban": True,
+    "voluntary_leave_message": (
+        "⚡︎ **WXRST**\n\n"
+        "〻 We noticed that you left **{SERVER_NAME}**.\n\n"
+        "[LEAVE MESSAGE WILL BE DECIDED LATER]\n\n"
+        "» If you'd like to come back:\n`{SERVER_INVITE}`\n\n"
+        "𑣲 **You're always welcome back.**"
+    ),
+    "kicked_message": (
+        "⤫ **WXRST**\n\n"
+        "〻 You have been **kicked** from `{SERVER_NAME}`.\n\n"
+        "[KICK MESSAGE WILL BE DECIDED LATER]\n\n"
+        "» Server link:\n`{SERVER_INVITE}`"
+    ),
+    "banned_message": (
+        "⤫ **WXRST**\n\n"
+        "〻 You have been **banned** from `{SERVER_NAME}`.\n\n"
+        "[BAN MESSAGE WILL BE DECIDED LATER]\n\n"
+        "» Server link:\n`{SERVER_INVITE}`"
+    ),
+}
+recent_departure_bans: dict[tuple[int, int], float] = {}
+sent_departure_dms: dict[tuple[int, int], float] = {}
+
+
+def departure_settings(guild_id: int) -> dict[str, Any]:
+    saved = get_guild_settings(guild_id).get("departure_dm", {})
+    return {**DEPARTURE_DEFAULTS, **saved}
+
+
+def save_departure_settings(guild_id: int, settings: dict[str, Any]) -> None:
+    set_guild_setting(guild_id, "departure_dm", settings)
+
+
+def departure_template(member: discord.abc.User, guild: discord.Guild, settings: dict[str, Any], departure_type: str) -> str:
+    template_key = {"leave": "voluntary_leave_message", "kick": "kicked_message", "ban": "banned_message"}[departure_type]
+    template = settings.get(template_key, DEPARTURE_DEFAULTS[template_key])
+    replacements = {
+        "{USER}": member.mention,
+        "{USERNAME}": member.name,
+        "{DISPLAY_NAME}": getattr(member, "display_name", member.name),
+        "{SERVER_NAME}": guild.name,
+        "{SERVER_ID}": str(guild.id),
+        "{SERVER_INVITE}": settings.get("server_invite", ""),
+    }
+    for placeholder, value in replacements.items():
+        template = template.replace(placeholder, value)
+    return template
+
+
+def departure_dm_allowed(settings: dict[str, Any], departure_type: str) -> bool:
+    return bool(settings.get("enabled")) and bool(settings.get(f"send_{departure_type}", True))
+
+
+async def send_departure_dm(member: discord.abc.User, guild: discord.Guild, departure_type: str) -> None:
+    """Send one configurable DM at most once per member departure."""
+    settings = departure_settings(guild.id)
+    if not departure_dm_allowed(settings, departure_type):
+        return
+    key = (guild.id, member.id)
+    now = time.monotonic()
+    previous = sent_departure_dms.get(key)
+    if previous and now - previous < 120:
+        return
+    sent_departure_dms[key] = now
+    try:
+        await member.send(departure_template(member, guild, settings, departure_type))
+        logger.info("Sent %s departure DM to %s in guild %s", departure_type, member.id, guild.id)
+    except (discord.Forbidden, discord.HTTPException) as error:
+        logger.info("Could not deliver %s departure DM to %s: %s", departure_type, member.id, error)
+
+
+async def handle_member_departure(member: discord.Member) -> None:
+    """Classify a removal as ban, kick, or voluntary leave without blocking events."""
+    guild, key = member.guild, (member.guild.id, member.id)
+    await asyncio.sleep(2)  # Audit entries can arrive after on_member_remove.
+    now = time.monotonic()
+    if recent_departure_bans.get(key, 0) > now - 30:
+        return  # on_member_ban sends the ban template.
+
+    departure_type = "leave"
+    try:
+        async for entry in guild.audit_logs(limit=6, action=discord.AuditLogAction.kick):
+            target = getattr(entry, "target", None)
+            if target and target.id == member.id and (discord.utils.utcnow() - entry.created_at).total_seconds() < 20:
+                departure_type = "kick"
+                break
+    except (discord.Forbidden, discord.HTTPException) as error:
+        # Without audit-log access, the safe fallback is a voluntary departure.
+        logger.info("Could not inspect kick audit log in guild %s: %s", guild.id, error)
+    await send_departure_dm(member, guild, departure_type)
+
+
+@bot.event
+async def on_member_ban(guild: discord.Guild, user: discord.User) -> None:
+    recent_departure_bans[(guild.id, user.id)] = time.monotonic()
+    await send_departure_dm(user, guild, "ban")
+
+
+departure_group = app_commands.Group(name="departure", description="Configure member departure DMs")
+
+
+def require_departure_admin(interaction: discord.Interaction) -> bool:
+    return isinstance(interaction.user, discord.Member) and interaction.user.guild_permissions.administrator
+
+
+@departure_group.command(name="config", description="Show the current departure DM configuration")
+async def departure_config(interaction: discord.Interaction) -> None:
+    if not require_departure_admin(interaction):
+        await interaction.response.send_message("Only administrators can configure departure DMs.", ephemeral=True)
+        return
+    settings = departure_settings(interaction.guild.id)
+    embed = discord.Embed(title="Member Departure DM Configuration", color=discord.Color.blurple())
+    embed.description = (
+        f"**System:** {'Enabled' if settings['enabled'] else 'Disabled'}\n"
+        f"**Voluntary leave DMs:** {'On' if settings['send_leave'] else 'Off'}\n"
+        f"**Kick DMs:** {'On' if settings['send_kick'] else 'Off'}\n"
+        f"**Ban DMs:** {'On' if settings['send_ban'] else 'Off'}\n"
+        f"**Invite configured:** {'Yes' if settings['server_invite'] else 'No'}"
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@departure_group.command(name="enable", description="Enable member departure DMs")
+async def departure_enable(interaction: discord.Interaction) -> None:
+    if not require_departure_admin(interaction):
+        await interaction.response.send_message("Only administrators can configure departure DMs.", ephemeral=True)
+        return
+    settings = departure_settings(interaction.guild.id)
+    settings["enabled"] = True
+    save_departure_settings(interaction.guild.id, settings)
+    await interaction.response.send_message("✅ Member departure DMs are enabled.", ephemeral=True)
+
+
+@departure_group.command(name="disable", description="Disable member departure DMs")
+async def departure_disable(interaction: discord.Interaction) -> None:
+    if not require_departure_admin(interaction):
+        await interaction.response.send_message("Only administrators can configure departure DMs.", ephemeral=True)
+        return
+    settings = departure_settings(interaction.guild.id)
+    settings["enabled"] = False
+    save_departure_settings(interaction.guild.id, settings)
+    await interaction.response.send_message("✅ Member departure DMs are disabled.", ephemeral=True)
+
+
+@departure_group.command(name="setinvite", description="Set the invite included in departure DMs")
+@app_commands.describe(invite="Full Discord invite URL or invite code")
+async def departure_setinvite(interaction: discord.Interaction, invite: str) -> None:
+    if not require_departure_admin(interaction):
+        await interaction.response.send_message("Only administrators can configure departure DMs.", ephemeral=True)
+        return
+    cleaned = invite.strip()
+    if not cleaned:
+        await interaction.response.send_message("Provide a valid server invite.", ephemeral=True)
+        return
+    if not cleaned.startswith("http"):
+        cleaned = f"https://discord.gg/{cleaned.removeprefix('discord.gg/')}"
+    settings = departure_settings(interaction.guild.id)
+    settings["server_invite"] = cleaned
+    save_departure_settings(interaction.guild.id, settings)
+    await interaction.response.send_message("✅ Departure DM invite saved.", ephemeral=True)
+
+
+DEPARTURE_MESSAGE_CHOICES = [
+    app_commands.Choice(name="Voluntary leave", value="leave"),
+    app_commands.Choice(name="Kicked", value="kick"),
+    app_commands.Choice(name="Banned", value="ban"),
+]
+
+
+@departure_group.command(name="setmessage", description="Set a departure DM message template")
+@app_commands.choices(message_type=DEPARTURE_MESSAGE_CHOICES)
+@app_commands.describe(message_type="Departure situation", message="Supports {USER}, {USERNAME}, {DISPLAY_NAME}, {SERVER_NAME}, {SERVER_ID}, {SERVER_INVITE}")
+async def departure_setmessage(interaction: discord.Interaction, message_type: app_commands.Choice[str], message: str) -> None:
+    if not require_departure_admin(interaction):
+        await interaction.response.send_message("Only administrators can configure departure DMs.", ephemeral=True)
+        return
+    keys = {"leave": "voluntary_leave_message", "kick": "kicked_message", "ban": "banned_message"}
+    settings = departure_settings(interaction.guild.id)
+    settings[keys[message_type.value]] = message[:2000]
+    save_departure_settings(interaction.guild.id, settings)
+    await interaction.response.send_message(f"✅ {message_type.name} departure message saved.", ephemeral=True)
+
+
+@departure_group.command(name="settings", description="Choose which departure types send DMs")
+async def departure_settings_command(interaction: discord.Interaction, voluntary_leave: bool = True, kicked: bool = True, banned: bool = True) -> None:
+    if not require_departure_admin(interaction):
+        await interaction.response.send_message("Only administrators can configure departure DMs.", ephemeral=True)
+        return
+    settings = departure_settings(interaction.guild.id)
+    settings.update({"send_leave": voluntary_leave, "send_kick": kicked, "send_ban": banned})
+    save_departure_settings(interaction.guild.id, settings)
+    await interaction.response.send_message("✅ Departure-type settings saved.", ephemeral=True)
+
+
+@departure_group.command(name="test", description="DM yourself a safe preview of a departure template")
+@app_commands.choices(message_type=DEPARTURE_MESSAGE_CHOICES)
+async def departure_test(interaction: discord.Interaction, message_type: app_commands.Choice[str]) -> None:
+    if not require_departure_admin(interaction):
+        await interaction.response.send_message("Only administrators can test departure DMs.", ephemeral=True)
+        return
+    settings = departure_settings(interaction.guild.id)
+    try:
+        await interaction.user.send(departure_template(interaction.user, interaction.guild, settings, message_type.value))
+        await interaction.response.send_message("✅ Test DM sent to you.", ephemeral=True)
+    except (discord.Forbidden, discord.HTTPException):
+        preview = departure_template(interaction.user, interaction.guild, settings, message_type.value)
+        await interaction.response.send_message(f"I couldn't DM you. Preview:\n\n{preview}", ephemeral=True)
+
+
+bot.tree.add_command(departure_group)
 
 
 # ---------------------------------------------------------------------------

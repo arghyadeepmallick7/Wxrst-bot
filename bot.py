@@ -39,7 +39,9 @@ logger = logging.getLogger("wxrst_bot")
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
+intents.voice_states = True
 bot = commands.Bot(command_prefix="!", intents=intents)
+commands_synced = False
 
 
 # ---------------------------------------------------------------------------
@@ -516,12 +518,32 @@ def require_ffmpeg_message() -> str:
 
 @bot.event
 async def on_ready() -> None:
+    global commands_synced
     print(f"✅ Logged in as {bot.user} (ready to work!)")
-    try:
-        synced = await bot.tree.sync()
-        print(f"✅ Synced {len(synced)} slash command(s)")
-    except Exception as error:
-        print(f"⚠️ Could not sync commands: {error}")
+    if not commands_synced:
+        try:
+            # Guild command sync is immediate. Global Discord commands can take
+            # up to an hour to appear, which made /vcnotify look missing.
+            if GUILD_ID:
+                command_guild = discord.Object(id=GUILD_ID)
+                bot.tree.copy_global_to(guild=command_guild)
+                synced = await bot.tree.sync(guild=command_guild)
+                print(f"✅ Synced {len(synced)} slash command(s) to guild {GUILD_ID}")
+            else:
+                # Also provide immediate command availability when the optional
+                # GUILD_ID environment variable has not been filled in yet.
+                total = 0
+                for guild in bot.guilds:
+                    bot.tree.copy_global_to(guild=guild)
+                    total += len(await bot.tree.sync(guild=guild))
+                print(f"✅ Synced {total} slash command(s) to {len(bot.guilds)} guild(s)")
+            commands_synced = True
+        except Exception as error:
+            print(f"⚠️ Could not sync slash commands: {error}")
+    if not bot.intents.message_content:
+        logger.warning("Message Content intent is disabled; bracket TTS cannot read message text.")
+    if not bot.intents.voice_states:
+        logger.warning("Voice States intent is disabled; /vcnotify cannot receive voice changes.")
     register_ticket_views()
 
 
@@ -2622,4 +2644,4 @@ bot.tree.add_command(ticket_group)
 if __name__ == "__main__":
     if not TOKEN:
         raise SystemExit("No token found! Open .env and set DISCORD_TOKEN.")
-    bot.run(TOKEN)
+ 

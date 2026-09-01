@@ -1,5 +1,6 @@
 """
 Wxrst DM and community bot with a per-server music player.
+Wxrst DM and community bot.
 
 Secrets belong in .env; this file never stores a Discord token, cookies, or API keys.
 """
@@ -604,6 +605,7 @@ async def notify(interaction: discord.Interaction, message: str) -> None:
             await member.send(f"📢 **Message from {interaction.guild.name}:**\n\n{message}")
             sent += 1
         except discord.Forbidden:
+        except (discord.Forbidden, discord.HTTPException):
             failed += 1
 
     await interaction.followup.send(

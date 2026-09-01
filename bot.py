@@ -40,7 +40,24 @@ intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 intents.voice_states = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+
+
+class WxrstCommandTree(app_commands.CommandTree):
+    """Keep slash commands restricted to the configured home server."""
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild is None:
+            await interaction.response.send_message("This bot only works inside its server.", ephemeral=True)
+            return False
+        if GUILD_ID and interaction.guild.id != GUILD_ID:
+            await interaction.response.send_message(
+                "This bot is private and only works in its home server.", ephemeral=True
+            )
+            return False
+        return True
+
+
+bot = commands.Bot(command_prefix="!", intents=intents, tree_cls=WxrstCommandTree)
 commands_synced = False
 
 
@@ -552,24 +569,6 @@ async def on_guild_join(guild: discord.Guild) -> None:
     if GUILD_ID and guild.id != GUILD_ID:
         print(f"🚪 Leaving unauthorized server: {guild.name} ({guild.id})")
         await guild.leave()
-
-
-async def block_other_servers(interaction: discord.Interaction) -> bool:
-    if interaction.guild is None:
-        await interaction.response.send_message("This bot only works inside its server.", ephemeral=True)
-        return False
-    if GUILD_ID and interaction.guild.id != GUILD_ID:
-        await interaction.response.send_message(
-            "This bot is private and only works in its home server.", ephemeral=True
-        )
-        return False
-    return True
-
-
-# CommandTree.interaction_check is an override hook, not a decorator. Register
-# the normal coroutine with add_check so discord.py awaits it for every slash
-# command instead of creating an un-awaited coroutine during startup.
-bot.tree.add_check(block_other_servers)
 
 
 # ---------------------------------------------------------------------------

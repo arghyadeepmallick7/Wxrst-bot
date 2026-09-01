@@ -554,7 +554,6 @@ async def on_guild_join(guild: discord.Guild) -> None:
         await guild.leave()
 
 
-@bot.tree.interaction_check
 async def block_other_servers(interaction: discord.Interaction) -> bool:
     if interaction.guild is None:
         await interaction.response.send_message("This bot only works inside its server.", ephemeral=True)
@@ -565,6 +564,12 @@ async def block_other_servers(interaction: discord.Interaction) -> bool:
         )
         return False
     return True
+
+
+# CommandTree.interaction_check is an override hook, not a decorator. Register
+# the normal coroutine with add_check so discord.py awaits it for every slash
+# command instead of creating an un-awaited coroutine during startup.
+bot.tree.add_check(block_other_servers)
 
 
 # ---------------------------------------------------------------------------
@@ -2644,4 +2649,4 @@ bot.tree.add_command(ticket_group)
 if __name__ == "__main__":
     if not TOKEN:
         raise SystemExit("No token found! Open .env and set DISCORD_TOKEN.")
- 
+    bot.run(TOKEN)

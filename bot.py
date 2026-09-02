@@ -544,94 +544,170 @@ bot.tree.add_command(moderation_dm_group)
 
 
 # ---------------------------------------------------------------------------
-# Target voice-channel join/leave notifications
+# Voice-channel join/leave notifications
 # ---------------------------------------------------------------------------
-
+# Discord voice channels are Messageable in modern discord.py, so the bot can
+# send the notification directly into the voice channel's built-in chat.
 VOICE_NOTIFICATION_DEFAULTS = {
-    "enabled": False,
-    "voice_channel_id": None,
-    "text_channel_id": None,
-    "join_message": "{USER} joined the VC.",
-    "leave_message": "{USER} left the VC.",
+    "enabled": True,
+    "voice_channel_ids": [],
+    "join_message": "🎙️ {USER} joined the voice channel.",
+    "leave_message": "👋 {USER} left the voice channel.",
 }
 
 
 def voice_notification_settings(guild_id: int) -> dict[str, Any]:
-    return {**VOICE_NOTIFICATION_DEFAULTS, **get_guild_settings(guild_id).get("voice_notifications", {})}
+    saved = get_guild_settings(guild_id).get("voice_notifications", {})
+    settings = {**VOICE_NOTIFICATION_DEFAULTS, **saved}
+
+    # Migrate the old single-channel configuration automatically.
+    ids = list(settings.get("voice_channel_ids") or [])
+    old_id = saved.get("voice_channel_id")
+    if old_id and int(old_id) not in [int(channel_id) for channel_id in ids]:
+        ids.append(int(old_id))
+    settings["voice_channel_ids"] = [int(channel_id) for channel_id in ids]
+    return settings
 
 
 def save_voice_notification_settings(guild_id: int, settings: dict[str, Any]) -> None:
+    settings["voice_channel_ids"] = [int(channel_id) for channel_id in settings.get("voice_channel_ids", [])]
+    settings.pop("voice_channel_id", None)
+    settings.pop("text_channel_id", None)
     set_guild_setting(guild_id, "voice_notifications", settings)
 
 
-voice_notify_group = app_commands.Group(name="vcnotify", description="Configure target voice-channel notifications")
+voice_notify_group = app_commands.Group(
+    name="vcnotify",
+    description="Configure join/leave messages inside voice-channel chats",
+)
 
 
-@voice_notify_group.command(name="set", description="Choose the voice channel to watch and the text channel to notify")
-@app_commands.describe(voice_channel="The voice channel to watch", text_channel="The channel where alerts are posted")
-async def vcnotify_set(interaction: discord.Interaction, voice_channel: discord.VoiceChannel, text_channel: discord.TextChannel) -> None:
+@voice_notify_group.command(name="set", description="Add a voice channel to the notification list")
+@app_commands.describe(voice_channel="The voice channel whose built-in chat should receive notifications")
+async def vcnotify_set(interaction: discord.Interaction, voice_channel: discord.VoiceChannel) -> None:
     if not require_guild_admin(interaction):
-        await interaction.response.send_message("Only administrators can configure voice notifications.", ephemeral=True)
+        await interaction.response.send_message(
+            "Only administrators can configure voice notifications.", ephemeral=True
+        )
         return
+
     settings = voice_notification_settings(interaction.guild.id)
-    settings.update({"voice_channel_id": voice_channel.id, "text_channel_id": text_channel.id, "enabled": True})
-    save_voice_notification_settings(interaction.guild.id, settings)
-    await interaction.response.send_message(
-        f"✅ Watching {voice_channel.mention}; join/leave alerts will be posted in {text_channel.mention}.",
-        ephemeral=True,
-    )
+    channel_ids = settings.setdefault("voice_channel_ids", [])
+    if voice_channel.id not in channel_ids:
+        channel_ids.append(voice_channel.id)
+        settings["enabled"] = True
+        save_voice_notification_settings(interaction.guild.id, settings)
+        await interaction.response.send_message(
+            f"✅ {voice_channel.mention} is now monitored. Join/leave messages will appear in its own VC chat.",
+            ephemeral=True,
+        )
+    else:
+        await interaction.response.send_message(
+            f"ℹ️ {voice_channel.mention} is already monitored.", ephemeral=True
+        )
 
 
-@voice_notify_group.command(name="enable", description="Enable configured voice notifications")
+@voice_notify_group.command(name="remove", description="Stop notifications for a voice channel")
+@app_commands.describe(voice_channel="The voice channel to stop monitoring")
+async def vcnotify_remove(interaction: discord.Interaction, voice_channel: discord.VoiceChannel) -> None:
+    if not require_guild_admin(interaction):
+        await interaction.response.send_message(
+            "Only administrators can configure voice notifications.", ephemeral=True
+        )
+        return
+
+    settings = voice_notification_settings(interaction.guild.id)
+    channel_ids = settings.setdefault("voice_channel_ids", [])
+    if voice_channel.id in channel_ids:
+        channel_ids.remove(voice_channel.id)
+        save_voice_notification_settings(interaction.guild.id, settings)
+        await interaction.response.send_message(
+            f"✅ {voice_channel.mention} was removed from voice notifications.", ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(
+            f"ℹ️ {voice_channel.mention} is not currently monitored.", ephemeral=True
+        )
+
+
+@voice_notify_group.command(name="enable", description="Enable voice-channel notifications")
 async def vcnotify_enable(interaction: discord.Interaction) -> None:
     if not require_guild_admin(interaction):
-        await interaction.response.send_message("Only administrators can configure voice notifications.", ephemeral=True)
+        await interaction.response.send_message(
+            "Only administrators can configure voice notifications.", ephemeral=True
+        )
         return
+
     settings = voice_notification_settings(interaction.guild.id)
-    if not settings.get("voice_channel_id") or not settings.get("text_channel_id"):
-        await interaction.response.send_message("Use `/vcnotify set` first.", ephemeral=True)
+    if not settings.get("voice_channel_ids"):
+        await interaction.response.send_message(
+            "Use `/vcnotify set` first to choose at least one voice channel.", ephemeral=True
+        )
         return
+
     settings["enabled"] = True
     save_voice_notification_settings(interaction.guild.id, settings)
     await interaction.response.send_message("✅ Voice notifications are enabled.", ephemeral=True)
 
 
-@voice_notify_group.command(name="disable", description="Disable voice notifications")
+@voice_notify_group.command(name="disable", description="Disable voice-channel notifications")
 async def vcnotify_disable(interaction: discord.Interaction) -> None:
     if not require_guild_admin(interaction):
-        await interaction.response.send_message("Only administrators can configure voice notifications.", ephemeral=True)
+        await interaction.response.send_message(
+            "Only administrators can configure voice notifications.", ephemeral=True
+        )
         return
+
     settings = voice_notification_settings(interaction.guild.id)
     settings["enabled"] = False
     save_voice_notification_settings(interaction.guild.id, settings)
     await interaction.response.send_message("✅ Voice notifications are disabled.", ephemeral=True)
 
 
-@voice_notify_group.command(name="messages", description="Set the messages sent when users join or leave")
-@app_commands.describe(join_message="Supports {USER}, {USERNAME}, {DISPLAY_NAME}, {SERVER_NAME}", leave_message="Supports the same placeholders")
-async def vcnotify_messages(interaction: discord.Interaction, join_message: str, leave_message: str) -> None:
+@voice_notify_group.command(name="messages", description="Set the join and leave messages")
+@app_commands.describe(
+    join_message="Message sent in the VC chat when someone joins",
+    leave_message="Message sent in the VC chat when someone leaves",
+)
+async def vcnotify_messages(
+    interaction: discord.Interaction,
+    join_message: str,
+    leave_message: str,
+) -> None:
     if not require_guild_admin(interaction):
-        await interaction.response.send_message("Only administrators can configure voice notifications.", ephemeral=True)
+        await interaction.response.send_message(
+            "Only administrators can configure voice notifications.", ephemeral=True
+        )
         return
+
     settings = voice_notification_settings(interaction.guild.id)
     settings["join_message"] = join_message[:2000]
     settings["leave_message"] = leave_message[:2000]
     save_voice_notification_settings(interaction.guild.id, settings)
-    await interaction.response.send_message("✅ Voice notification messages saved.", ephemeral=True)
+    await interaction.response.send_message(
+        "✅ Voice notification messages saved.", ephemeral=True
+    )
 
 
-@voice_notify_group.command(name="status", description="Show the current voice notification configuration")
+@voice_notify_group.command(name="status", description="Show voice notification settings")
 async def vcnotify_status(interaction: discord.Interaction) -> None:
     if not require_guild_admin(interaction):
-        await interaction.response.send_message("Only administrators can view voice notification settings.", ephemeral=True)
+        await interaction.response.send_message(
+            "Only administrators can view voice notification settings.", ephemeral=True
+        )
         return
+
     settings = voice_notification_settings(interaction.guild.id)
-    target = interaction.guild.get_channel(settings.get("voice_channel_id")) if settings.get("voice_channel_id") else None
-    destination = interaction.guild.get_channel(settings.get("text_channel_id")) if settings.get("text_channel_id") else None
+    channels = []
+    for channel_id in settings.get("voice_channel_ids", []):
+        channel = interaction.guild.get_channel(int(channel_id))
+        channels.append(channel.mention if isinstance(channel, discord.VoiceChannel) else f"`{channel_id}`")
+
     await interaction.response.send_message(
         f"**Voice notifications:** {'enabled' if settings.get('enabled') else 'disabled'}\n"
-        f"**Watched voice channel:** {target.mention if target else 'Not set'}\n"
-        f"**Alert channel:** {destination.mention if destination else 'Not set'}",
+        f"**Monitored VC chats:** {', '.join(channels) if channels else 'None'}\n"
+        f"**Join:** {settings.get('join_message', '')}\n"
+        f"**Leave:** {settings.get('leave_message', '')}",
         ephemeral=True,
     )
 
@@ -640,42 +716,61 @@ bot.tree.add_command(voice_notify_group)
 
 
 @bot.event
-async def on_voice_state_update(member: discord.Member, before: discord.VoiceState, after: discord.VoiceState) -> None:
-    """Notify only for entries to or exits from the configured target voice channel."""
-    if member.bot:
+async def on_voice_state_update(
+    member: discord.Member,
+    before: discord.VoiceState,
+    after: discord.VoiceState,
+) -> None:
+    """Send each join/leave notification into the matching VC's own chat."""
+    if member.bot or member.guild is None:
         return
 
     before_id = before.channel.id if before.channel else None
     after_id = after.channel.id if after.channel else None
-    if before_id == after_id:  # mute/deafen/stream/video changes are not joins or leaves
+
+    # Ignore mute/deafen/camera/stream changes within the same VC.
+    if before_id == after_id:
         return
 
     settings = voice_notification_settings(member.guild.id)
     if not settings.get("enabled"):
         return
-    target_id = settings.get("voice_channel_id")
-    destination_id = settings.get("text_channel_id")
-    if not target_id or not destination_id:
-        return
 
-    if after_id == target_id and before_id != target_id:
-        template = settings["join_message"]
-    elif before_id == target_id and after_id != target_id:
-        template = settings["leave_message"]
-    else:
-        return  # a move between two other channels
+    monitored_ids = {int(channel_id) for channel_id in settings.get("voice_channel_ids", [])}
 
-    destination = member.guild.get_channel(destination_id)
-    if not isinstance(destination, discord.TextChannel):
-        logger.warning("[VC NOTIFY] Configured text channel %s was not found in guild %s", destination_id, member.guild.id)
-        return
-    try:
-        await destination.send(
-            fill_user_template(template, member, member.guild),
-            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
-        )
-    except (discord.Forbidden, discord.HTTPException) as error:
-        logger.info("[VC NOTIFY] Failed to post alert in guild %s: %s", member.guild.id, error)
+    # Joining a monitored VC: send directly to that VC's built-in chat.
+    if after.channel and after_id in monitored_ids:
+        try:
+            await after.channel.send(
+                fill_user_template(settings.get("join_message", "{USER} joined the voice channel."), member, member.guild),
+                allowed_mentions=discord.AllowedMentions(
+                    users=True, roles=False, everyone=False, replied_user=False
+                ),
+            )
+        except (discord.Forbidden, discord.HTTPException) as error:
+            logger.info(
+                "[VC NOTIFY] Could not send join message in %s (%s): %s",
+                after.channel.name,
+                after.channel.id,
+                error,
+            )
+
+    # Leaving a monitored VC: send the leave message into that VC's own chat.
+    if before.channel and before_id in monitored_ids:
+        try:
+            await before.channel.send(
+                fill_user_template(settings.get("leave_message", "{USER} left the voice channel."), member, member.guild),
+                allowed_mentions=discord.AllowedMentions(
+                    users=True, roles=False, everyone=False, replied_user=False
+                ),
+            )
+        except (discord.Forbidden, discord.HTTPException) as error:
+            logger.info(
+                "[VC NOTIFY] Could not send leave message in %s (%s): %s",
+                before.channel.name,
+                before.channel.id,
+                error,
+            )
 
 
 @bot.event

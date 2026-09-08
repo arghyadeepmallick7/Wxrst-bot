@@ -560,6 +560,12 @@ async def warnings (interaction :discord .Interaction ,member :discord .Member )
     if not member_warnings :
         await interaction .response .send_message (f'**{member }** has no warnings.',ephemeral =True ); return
     text ='\n'.join ((f'{index +1 }. {reason }'for index ,reason in enumerate (member_warnings ))); await interaction .response .send_message (f'⚠️ Warnings for **{member }**:\n{text }',ephemeral =True )
+@bot .tree .command (name ='purge',description ='Purge recent messages in this channel (max 100)')
+@app_commands .describe (amount ='How many messages to delete (1-100)')
+async def purge (interaction :discord .Interaction ,amount :app_commands .Range [int ,1 ,100 ])->None :
+    if not interaction .user .guild_permissions .manage_messages :
+        await interaction .response .send_message ("You don't have permission to delete messages.",ephemeral =True ); return
+    await interaction .response .defer (ephemeral =True ); deleted =await interaction .channel .purge (limit =amount ); await interaction .followup .send (f'🧹 Purged {len (deleted )} message(s).',ephemeral =True )
 @bot .tree .command (name ='clear',description ='Delete a number of recent messages in this channel')
 @app_commands .describe (amount ='How many messages to delete (max 100)')
 async def clear (interaction :discord .Interaction ,amount :app_commands .Range [int ,1 ,100 ])->None :

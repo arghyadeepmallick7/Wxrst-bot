@@ -295,15 +295,209 @@ async def setautonickname(interaction: discord.Interaction, format: Optional[str
     await interaction.response.send_message(message, ephemeral=True)
 
 
-@bot.tree.command(name="automod", description="Turn the bad-word and spam filter on or off")
-@app_commands.describe(state="Turn automod on or off")
-@app_commands.choices(state=[app_commands.Choice(name="on", value="on"), app_commands.Choice(name="off", value="off")])
-async def automod(interaction: discord.Interaction, state: app_commands.Choice[str]) -> None:
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("Only a server admin can set this up.", ephemeral=True)
+AUTOMOD_WARNING_LIMIT = 3
+AUTOMOD_WARNING_RESET_SECONDS = 24 * 60 * 60
+AUTOMOD_TIMEOUT_DEFAULTS = {
+    "spam": 5,
+    "massping": 10,
+    "emoji": 5,
+    "nsfw": 30,
+    "promotion": 15,
+    "links": 10,
+    "badword": 10,
+    "caps": 5,
+    "flood": 5,
+    "raid": 15,
+}
+AUTOMOD_CATEGORY_LABELS = {
+    "spam": "Message Spamming",
+    "massping": "Mass Pinging",
+    "emoji": "Emoji or Sticker Spamming",
+    "nsfw": "NSFW or Sexual Content",
+    "promotion": "Discord Invite or Server Promotion",
+    "links": "Suspicious or Unapproved Link",
+    "badword": "Blocked Word",
+    "caps": "Excessive Caps or Character Flooding",
+    "flood": "Repeated Message Flooding",
+    "raid": "Raid-like Spam Behavior",
+}
+AUTOMOD_CATEGORY_CHOICES = [
+    app_commands.Choice(name=label, value=key)
+    for key, label in AUTOMOD_CATEGORY_LABELS.items()
+] + [
+    app_commands.Choice(name="Spamming", value="spamming"),
+]
+AUTOMOD_TIMEOUT_ALIASES = {"spamming": "spam", "emojis": "emoji", "invite": "promotion", "badwords": "badword"}
+AUTOMOD_URL_RE = re.compile(r"(?:https?://|www\\.)[^\s<>()]+", re.IGNORECASE)
+AUTOMOD_INVITE_RE = re.compile(r"(?:discord(?:app)?\\.com/invite|discord\\.gg|discord\\.com/invite)/[A-Za-z0-9-]+", re.IGNORECASE)
+AUTOMOD_SUSPICIOUS_LINK_RE = re.compile(r"(?:bit\\.ly|tinyurl\\.com|t\\.co|cutt\\.ly|(?:https?://)?(?:\\d{1,3}\\.){3}\\d{1,3})", re.IGNORECASE)
+AUTOMOD_NSFW_RE = re.compile(r"\\b(?:nsfw|nudes?|naked|porn(?:hub)?|sex(?:ual|ting)?|onlyfans|dick|pussy|blowjob|hentai)\\b", re.IGNORECASE)
+AUTOMOD_CUSTOM_EMOJI_RE = re.compile(r"<a?:[A-Za-z0-9_]+:\\d+>")
+AUTOMOD_UNICODE_EMOJI_RE = re.compile(r"[\\U0001F300-\\U0001FAFF\\u2600-\\u27BF]")
+
+
+def automod_settings(guild_id: int) -> dict[str, Any]:
+    """Return persisted AutoMod settings with safe defaults for older configs."""
+    settings = get_guild_settings(guild_id)
+    saved_durations = settings.get("automod_timeout_minutes", {})
+    durations = {
+        category: max(1, min(40320, int(saved_durations.get(category, default))))
+        for category, default in AUTOMOD_TIMEOUT_DEFAULTS.items()
+    }
+    return {"enabled": bool(settings.get("automod_enabled", False)), "durations": durations}
+
+
+def parse_automod_duration(value: str) -> Optional[int]:
+    match = re.fullmatch(r"(\\d+)\\s*([mhd]?)", value.strip().lower())
+    if not match:
+        return None
+    amount, unit = int(match.group(1)), match.group(2) or "m"
+    minutes = amount * {"m": 1, "h": 60, "d": 1440}[unit]
+    return minutes if 1 <= minutes <= 40320 else None
+
+
+def automod_warning_record(guild_id: int, member_id: int) -> tuple[dict, dict]:
+    """Get one member's persisted AutoMod warning record, resetting it after 24 hours."""
+    config = load_config()
+    guild_settings = config.setdefault(str(guild_id), {})
+    warnings = guild_settings.setdefault("automod_warnings", {})
+    member_key = str(member_id)
+    record = warnings.get(member_key, {})
+    now = discord.utils.utcnow().timestamp()
+    if not isinstance(record, dict) or now >= float(record.get("reset_at", 0)):
+        record = {"count": 0, "reset_at": now + AUTOMOD_WARNING_RESET_SECONDS}
+        warnings[member_key] = record
+    return config, record
+
+
+def automod_message_category(message: discord.Message, recent: list[tuple[float, str]]) -> Optional[str]:
+    """Return one category only, so one Discord event can create at most one warning."""
+    content = message.content or ""
+    lowered = content.lower()
+    custom_emoji_count = len(AUTOMOD_CUSTOM_EMOJI_RE.findall(content))
+    unicode_emoji_count = len(AUTOMOD_UNICODE_EMOJI_RE.findall(content))
+    mention_count = len(message.mentions) + len(message.role_mentions)
+    letters = [character for character in content if character.isalpha()]
+    caps_ratio = sum(character.isupper() for character in letters) / len(letters) if letters else 0
+    normalized = re.sub(r"\\s+", " ", lowered).strip()
+
+    if message.mention_everyone or "@everyone" in lowered or "@here" in lowered or mention_count >= 5:
+        return "massping"
+    if AUTOMOD_INVITE_RE.search(content):
+        return "promotion"
+    if AUTOMOD_NSFW_RE.search(content):
+        return "nsfw"
+    if AUTOMOD_SUSPICIOUS_LINK_RE.search(content) or AUTOMOD_URL_RE.search(content):
+        return "links"
+    if len(message.stickers) >= 3 or custom_emoji_count >= 5 or unicode_emoji_count >= 12:
+        return "emoji"
+    if len(content) >= 16 and (caps_ratio >= 0.75 or re.search(r"(.)\\1{11,}", content)):
+        return "caps"
+    if normalized and sum(previous == normalized for _, previous in recent) >= 2:
+        return "flood"
+    if len(recent) >= 5:
+        # A very new account rapidly posting is treated as raid-like; established
+        # members use the ordinary spam category instead.
+        account_age = discord.utils.utcnow() - message.author.created_at
+        return "raid" if account_age < datetime.timedelta(days=7) else "spam"
+    return None
+
+
+async def handle_automod_violation(message: discord.Message, category: str) -> None:
+    """Delete once, add one persisted warning, and timeout only at the limit."""
+    config, record = automod_warning_record(message.guild.id, message.author.id)
+    record["count"] = min(AUTOMOD_WARNING_LIMIT, int(record.get("count", 0)) + 1)
+    config[str(message.guild.id)]["automod_warnings"][str(message.author.id)] = record
+    save_config(config)
+
+    try:
+        await message.delete()
+    except (discord.Forbidden, discord.HTTPException):
+        logger.warning("AutoMod could not delete message %s in guild %s.", message.id, message.guild.id)
+
+    label = AUTOMOD_CATEGORY_LABELS[category]
+    warning_count = record["count"]
+    if warning_count < AUTOMOD_WARNING_LIMIT:
+        try:
+            await message.channel.send(
+                f"🚫 {message.author.mention}, **{label}** is not allowed. "
+                f"Warning {warning_count}/{AUTOMOD_WARNING_LIMIT}.",
+                delete_after=8,
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            pass
         return
-    set_guild_setting(interaction.guild.id, "automod_enabled", state.value == "on")
-    await interaction.response.send_message(f"✅ Automod is now **{state.value}**.", ephemeral=True)
+
+    minutes = automod_settings(message.guild.id)["durations"][category]
+    reason = f"{label}. Warnings: {warning_count}/{AUTOMOD_WARNING_LIMIT}."
+    if await apply_timeout(message.author, minutes, reason, bot.user):
+        try:
+            await message.channel.send(
+                f"🔇 {message.author.mention} was timed out for **{label}** "
+                f"after {warning_count}/{AUTOMOD_WARNING_LIMIT} warnings.",
+                delete_after=8,
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+
+automod_group = app_commands.Group(name="automod", description="Configure the AutoMod filter")
+
+
+@automod_group.command(name="on", description="Enable AutoMod")
+async def automod_on(interaction: discord.Interaction) -> None:
+    if not require_guild_admin(interaction):
+        await interaction.response.send_message("Only administrators can configure AutoMod.", ephemeral=True)
+        return
+    set_guild_setting(interaction.guild.id, "automod_enabled", True)
+    await interaction.response.send_message("✅ AutoMod is now **on**.", ephemeral=True)
+
+
+@automod_group.command(name="off", description="Disable AutoMod")
+async def automod_off(interaction: discord.Interaction) -> None:
+    if not require_guild_admin(interaction):
+        await interaction.response.send_message("Only administrators can configure AutoMod.", ephemeral=True)
+        return
+    set_guild_setting(interaction.guild.id, "automod_enabled", False)
+    await interaction.response.send_message("✅ AutoMod is now **off**.", ephemeral=True)
+
+
+@automod_group.command(name="timeout", description="Set an AutoMod category timeout, e.g. 5m or 1h")
+@app_commands.choices(category=AUTOMOD_CATEGORY_CHOICES)
+@app_commands.describe(duration="Duration from 1m to 28d, e.g. 5m, 1h, or 2d")
+async def automod_timeout(interaction: discord.Interaction, category: app_commands.Choice[str], duration: str) -> None:
+    if not require_guild_admin(interaction):
+        await interaction.response.send_message("Only administrators can configure AutoMod.", ephemeral=True)
+        return
+    minutes = parse_automod_duration(duration)
+    if minutes is None:
+        await interaction.response.send_message("Use a duration from 1m to 28d, for example `5m`, `1h`, or `2d`.", ephemeral=True)
+        return
+    category_key = AUTOMOD_TIMEOUT_ALIASES.get(category.value, category.value)
+    settings = get_guild_settings(interaction.guild.id)
+    durations = settings.setdefault("automod_timeout_minutes", {})
+    durations[category_key] = minutes
+    set_guild_setting(interaction.guild.id, "automod_timeout_minutes", durations)
+    await interaction.response.send_message(
+        f"✅ **{AUTOMOD_CATEGORY_LABELS[category_key]}** timeout set to **{duration.strip().lower()}**.",
+        ephemeral=True,
+    )
+
+
+@automod_group.command(name="status", description="Show AutoMod status, warning policy, and timeout durations")
+async def automod_status(interaction: discord.Interaction) -> None:
+    if not require_guild_admin(interaction):
+        await interaction.response.send_message("Only administrators can view AutoMod settings.", ephemeral=True)
+        return
+    settings = automod_settings(interaction.guild.id)
+    lines = [f"**{AUTOMOD_CATEGORY_LABELS[key]}:** {minutes} minute(s)" for key, minutes in settings["durations"].items()]
+    embed = discord.Embed(title="🛡️ AutoMod Status", color=discord.Color.green() if settings["enabled"] else discord.Color.red())
+    embed.description = (
+        f"**Status:** {'Enabled' if settings['enabled'] else 'Disabled'}\\n"
+        f"**Warnings:** {AUTOMOD_WARNING_LIMIT} maximum; each member's AutoMod warnings reset after 24 hours.\\n\\n"
+        + "\\n".join(lines)
+    )
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 @bot.tree.command(name="addbadword", description="Add a word for automod to delete automatically")
@@ -338,7 +532,7 @@ async def removebadword(interaction: discord.Interaction, word: str) -> None:
         await interaction.response.send_message("That word wasn't on the list.", ephemeral=True)
 
 
-recent_messages: dict[tuple[int, int], list[float]] = {}
+recent_messages: dict[tuple[int, int], list[tuple[float, str]]] = {}
 
 
 @bot.event
@@ -346,28 +540,17 @@ async def on_message(message: discord.Message) -> None:
     if message.author.bot or message.guild is None:
         return
 
-    settings = get_guild_settings(message.guild.id)
-    if settings.get("automod_enabled") and not message.author.guild_permissions.administrator:
-        bad_words = settings.get("bad_words", [])
-        if any(word in message.content.lower() for word in bad_words):
-            try:
-                await message.delete()
-                await message.channel.send(f"🚫 {message.author.mention}, that word isn't allowed here.", delete_after=5)
-            except discord.Forbidden:
-                pass
-            return
-
+    settings = automod_settings(message.guild.id)
+    if settings["enabled"] and not message.author.guild_permissions.administrator:
         key = (message.guild.id, message.author.id)
         now = discord.utils.utcnow().timestamp()
-        timestamps = [stamp for stamp in recent_messages.get(key, []) if now - stamp < 5]
-        timestamps.append(now)
-        recent_messages[key] = timestamps
-        if len(timestamps) > 5:
-            try:
-                await message.delete()
-                await message.channel.send(f"🚫 {message.author.mention}, please slow down (you're sending messages too fast).", delete_after=5)
-            except discord.Forbidden:
-                pass
+        recent = [(stamp, text) for stamp, text in recent_messages.get(key, []) if now - stamp < 60]
+        bad_words = get_guild_settings(message.guild.id).get("bad_words", [])
+        category = "badword" if any(word in message.content.lower() for word in bad_words) else automod_message_category(message, recent)
+        recent.append((now, re.sub(r"\\s+", " ", (message.content or "").lower()).strip()))
+        recent_messages[key] = recent
+        if category:
+            await handle_automod_violation(message, category)
             return
 
     await bot.process_commands(message)
@@ -1012,13 +1195,22 @@ async def timeout(interaction: discord.Interaction, member: discord.Member, minu
     if minutes < 1 or minutes > 40320:
         await interaction.response.send_message("Timeout duration must be between 1 minute and 28 days.", ephemeral=True)
         return
-    duration = discord.utils.utcnow() + datetime.timedelta(minutes=minutes)
-    await send_moderation_dm(member, "timeout", reason, interaction.user, f"{minutes} minute(s)")
-    try:
-        await member.edit(timed_out_until=duration, reason=f"{reason} (by {interaction.user})")
+    if await apply_timeout(member, minutes, reason, interaction.user):
         await interaction.response.send_message(f"🔇 Timed out **{member}** for {minutes} minute(s). Reason: {reason}")
-    except discord.Forbidden:
+    else:
         await interaction.response.send_message("I don't have permission to timeout that member.", ephemeral=True)
+
+
+async def apply_timeout(member: discord.Member, minutes: int, reason: str, moderator: discord.abc.User) -> bool:
+    """Shared timeout path for manual moderation and AutoMod, including its DM."""
+    duration = discord.utils.utcnow() + datetime.timedelta(minutes=minutes)
+    await send_moderation_dm(member, "timeout", reason, moderator, f"{minutes} minute(s)")
+    try:
+        await member.edit(timed_out_until=duration, reason=f"{reason} (by {moderator})")
+        return True
+    except (discord.Forbidden, discord.HTTPException) as error:
+        logger.warning("Could not timeout member %s in guild %s: %s", member.id, member.guild.id, error)
+        return False
 
 
 @bot.tree.command(name="warn", description="Give a member a warning (saved in their record)")
@@ -2180,10 +2372,10 @@ async def ticket_unclaim(interaction: discord.Interaction) -> None: await ticket
 
 bot.tree.add_command(ticket_config)
 bot.tree.add_command(ticket_group)
+bot.tree.add_command(automod_group)
 
 
 if __name__ == "__main__":
     if not TOKEN:
         raise SystemExit("No token found! Open .env and set DISCORD_TOKEN.")
     bot.run(TOKEN)
-

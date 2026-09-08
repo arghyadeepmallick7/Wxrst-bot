@@ -162,8 +162,17 @@ def automod_message_category (message :discord .Message ,recent :list [tuple [fl
         return 'emoji'
     if len (content )>=16 and (caps_ratio >=0.75 or re .search ('(.)\\\\1{11,}',content )):
         return 'caps'
-    if normalized and sum ((previous ==normalized for _ ,previous in recent ))>=2 :
-        return 'flood'
+    if normalized:
+        repeat_count = 0
+        for _, previous in reversed(recent):
+            if previous == normalized:
+                repeat_count += 1
+            else:
+                break
+        # First 3 consecutive identical messages are allowed.
+        # The 4th identical message starts the warning system.
+        if repeat_count >= 3:
+            return 'flood'
     if recent and discord .utils .utcnow ().timestamp ()-recent [-1][0] <1.0 :
         account_age =discord .utils .utcnow ()-message .author .created_at; return 'raid'if account_age <datetime .timedelta (days =7 )else 'spam'
     if len (recent )>=5 :

@@ -135,11 +135,11 @@ async def setautonickname (interaction :discord .Interaction ,format :Optional [
     if not interaction .user .guild_permissions .administrator :
         await interaction .response .send_message ('Only a server admin can set this up.',ephemeral =True ); return
     set_guild_setting (interaction .guild .id ,'autonickname_format',format ); message =f'✅ New members will be renamed using: `{format }`'if format else '✅ Autonickname turned off.'; await interaction .response .send_message (message ,ephemeral =True )
-AUTOMOD_WARNING_LIMIT =3; AUTOMOD_WARNING_RESET_SECONDS =60 *60; AUTOMOD_TIMEOUT_DEFAULTS ={'spam':5 ,'massping':10 ,'emoji':5 ,'nsfw':30 ,'promotion':15 ,'links':10 ,'badword':10 ,'caps':5 ,'flood':5 ,'raid':15 }; AUTOMOD_CATEGORY_LABELS ={'spam':'Message Spamming','massping':'Mass Pinging','emoji':'Emoji or Sticker Spamming','nsfw':'NSFW or Sexual Content','promotion':'Discord Invite or Server Promotion','links':'Suspicious or Unapproved Link','badword':'Blocked Word','caps':'Excessive Caps or Character Flooding','flood':'Repeated Message Flooding','raid':'Raid-like Spam Behavior'}; AUTOMOD_CATEGORY_CHOICES =[app_commands .Choice (name =label ,value =key )for key ,label in AUTOMOD_CATEGORY_LABELS .items ()]+[app_commands .Choice (name ='Spamming',value ='spamming')]; AUTOMOD_TIMEOUT_ALIASES ={'spamming':'spam','emojis':'emoji','invite':'promotion','badwords':'badword'}; AUTOMOD_URL_RE =re .compile ('(?:https?://|www\\\\.)[^\\s<>()]+',re .IGNORECASE ); AUTOMOD_INVITE_RE =re .compile ('(?:discord(?:app)?\\\\.com/invite|discord\\\\.gg|discord\\\\.com/invite)/[A-Za-z0-9-]+',re .IGNORECASE ); AUTOMOD_SUSPICIOUS_LINK_RE =re .compile ('(?:bit\\\\.ly|tinyurl\\\\.com|t\\\\.co|cutt\\\\.ly|(?:https?://)?(?:\\\\d{1,3}\\\\.){3}\\\\d{1,3})',re .IGNORECASE ); AUTOMOD_NSFW_RE =re .compile ('\\\\b(?:nsfw|nudes?|naked|porn(?:hub)?|sex(?:ual|ting)?|onlyfans|dick|pussy|blowjob|hentai)\\\\b',re .IGNORECASE ); AUTOMOD_CUSTOM_EMOJI_RE =re .compile ('<a?:[A-Za-z0-9_]+:\\\\d+>'); AUTOMOD_UNICODE_EMOJI_RE =re .compile ('[\\\\U0001F300-\\\\U0001FAFF\\\\u2600-\\\\u27BF]')
+AUTOMOD_WARNING_LIMIT =3; AUTOMOD_WARNING_RESET_SECONDS =60 *60; AUTOMOD_TIMEOUT_DEFAULTS ={'massping':10 ,'nsfw':30 ,'promotion':15 ,'links':10 ,'badword':10 ,'caps':5 }; AUTOMOD_CATEGORY_LABELS ={'massping':'Mass Pinging','nsfw':'NSFW or Sexual Content','promotion':'Discord Invite or Server Promotion','links':'Suspicious or Unapproved Link','badword':'Blocked Word','caps':'Excessive Caps or Character Flooding'}; AUTOMOD_CATEGORY_CHOICES =[app_commands .Choice (name =label ,value =key )for key ,label in AUTOMOD_CATEGORY_LABELS .items ()]; AUTOMOD_TIMEOUT_ALIASES ={'invite':'promotion','badwords':'badword'}; AUTOMOD_URL_RE =re .compile ('(?:https?://|www\\.)[^\\s<>()]+',re .IGNORECASE ); AUTOMOD_INVITE_RE =re .compile ('(?:discord(?:app)?\\.com/invite|discord\\.gg|discord\\.com/invite)/[A-Za-z0-9-]+',re .IGNORECASE ); AUTOMOD_SUSPICIOUS_LINK_RE =re .compile ('(?:bit\\.ly|tinyurl\\.com|t\\.co|cutt\\.ly|(?:https?://)?(?:\\d{1,3}\\.){3}\\d{1,3})',re .IGNORECASE ); AUTOMOD_NSFW_RE =re .compile ('\\b(?:nsfw|nudes?|naked|porn(?:hub)?|sex(?:ual|ting)?|onlyfans|dick|pussy|blowjob|hentai)\\b',re .IGNORECASE )
 def automod_settings (guild_id :int )->dict [str ,Any ]:
     settings =get_guild_settings (guild_id ); saved_durations =settings .get ('automod_timeout_minutes',{}); durations ={category :max (1 ,min (40320 ,int (saved_durations .get (category ,default ))))for category ,default in AUTOMOD_TIMEOUT_DEFAULTS .items ()}; return {'enabled':bool (settings .get ('automod_enabled',False )),'durations':durations }
 def parse_automod_duration (value :str )->Optional [int ]:
-    match =re .fullmatch ('(\\\\d+)\\\\s*([mhd]?)',value .strip ().lower ())
+    match =re .fullmatch ('(\\d+)\\s*([mhd]?)',value .strip ().lower ())
     if not match :
         return None 
     amount ,unit =(int (match .group (1 )),match .group (2 )or 'm'); minutes =amount *{'m':1 ,'h':60 ,'d':1440 }[unit ]; return minutes if 1 <=minutes <=40320 else None
@@ -148,8 +148,8 @@ def automod_warning_record (guild_id :int ,member_id :int )->tuple [dict ,dict ]
     if not isinstance (record ,dict )or now >=float (record .get ('reset_at',0 )):
         record ={'count':0 ,'reset_at':now +AUTOMOD_WARNING_RESET_SECONDS }; warnings [member_key ]=record
     return (config ,record )
-def automod_message_category (message :discord .Message ,recent :list [tuple [float ,str ]])->Optional [str ]:
-    content =message .content or ''; lowered =content .lower (); custom_emoji_count =len (AUTOMOD_CUSTOM_EMOJI_RE .findall (content )); unicode_emoji_count =len (AUTOMOD_UNICODE_EMOJI_RE .findall (content )); mention_count =len (message .mentions )+len (message .role_mentions ); letters =[character for character in content if character .isalpha ()]; caps_ratio =sum ((character .isupper ()for character in letters ))/len (letters )if letters else 0; normalized =re .sub ('\\\\s+',' ',lowered ).strip ()
+def automod_message_category (message :discord .Message )->Optional [str ]:
+    content =message .content or ''; lowered =content .lower (); mention_count =len (message .mentions )+len (message .role_mentions ); letters =[character for character in content if character .isalpha ()]; caps_ratio =sum ((character .isupper ()for character in letters ))/len (letters )if letters else 0
     if message .mention_everyone or '@everyone'in lowered or '@here'in lowered or (mention_count >=5 ):
         return 'massping'
     if AUTOMOD_INVITE_RE .search (content ):
@@ -158,25 +158,8 @@ def automod_message_category (message :discord .Message ,recent :list [tuple [fl
         return 'nsfw'
     if AUTOMOD_SUSPICIOUS_LINK_RE .search (content )or AUTOMOD_URL_RE .search (content ):
         return 'links'
-    if len (message .stickers )>=3 or custom_emoji_count >=5 or unicode_emoji_count >=12 :
-        return 'emoji'
-    if len (content )>=16 and (caps_ratio >=0.75 or re .search ('(.)\\\\1{11,}',content )):
+    if len (content )>=16 and (caps_ratio >=0.75 or re .search ('(.)\\1{11,}',content )):
         return 'caps'
-    if normalized:
-        repeat_count = 0
-        for _, previous in reversed(recent):
-            if previous == normalized:
-                repeat_count += 1
-            else:
-                break
-        # First 3 consecutive identical messages are allowed.
-        # The 4th identical message starts the warning system.
-        if repeat_count >= 3:
-            return 'flood'
-    if recent and discord .utils .utcnow ().timestamp ()-recent [-1][0] <1.0 :
-        account_age =discord .utils .utcnow ()-message .author .created_at; return 'raid'if account_age <datetime .timedelta (days =7 )else 'spam'
-    if len (recent )>=5 :
-        account_age =discord .utils .utcnow ()-message .author .created_at; return 'raid'if account_age <datetime .timedelta (days =7 )else 'spam'
     return None 
 async def handle_automod_violation (message :discord .Message ,category :str )->None :
     config ,record =automod_warning_record (message .guild .id ,message .author .id ); record ['count']=min (AUTOMOD_WARNING_LIMIT ,int (record .get ('count',0 ))+1 ); config [str (message .guild .id )]['automod_warnings'][str (message .author .id )]=record; save_config (config )
@@ -242,7 +225,16 @@ async def removebadword (interaction :discord .Interaction ,word :str )->None :
         bad_words .remove (word_lower ); set_guild_setting (interaction .guild .id ,'bad_words',bad_words ); await interaction .response .send_message (f'✅ Removed `{word }` from the blocked word list.',ephemeral =True )
     else :
         await interaction .response .send_message ("That word wasn't on the list.",ephemeral =True )
-recent_messages :dict [tuple [int ,int ],list [tuple [float ,str ]]]={}
+@bot .event 
+async def on_message (message :discord .Message )->None :
+    if message .author .bot or message .guild is None :
+        return 
+    settings =automod_settings (message .guild .id )
+    if settings ['enabled']and (not message .author .guild_permissions .administrator ):
+        bad_words =get_guild_settings (message .guild .id ).get ('bad_words',[]); category ='badword'if any ((word in message .content .lower ()for word in bad_words ))else automod_message_category (message )
+        if category :
+            await handle_automod_violation (message ,category ); return
+    await bot .process_commands (message )
 @bot .event 
 async def on_message (message :discord .Message )->None :
     if message .author .bot or message .guild is None :
